@@ -1,0 +1,15 @@
+services:
+  rawdata:
+    build: .
+    image: tw-stock-rawdata:dev
+    environment:
+      DATABASE_URL: postgresql://twstock:twstock@postgres:5432/twstock
+      USE_DB: "true"
+    networks:
+      - twstock-net
+    profiles: ["app"]
+
+networks:
+  twstock-net:
+    external: true
+    name: twstock-net
