@@ -1,0 +1,38 @@
+[project]
+name = "tw-stock-rawdata"
+version = "0.1.0"
+description = "Taiwan stock daily raw data fetcher (TWSE / TPEX / MoneyDJ → PostgreSQL)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "pandas>=2.2.0",
+  "numpy>=2.0.0",
+  "requests>=2.32.0",
+  "lxml>=5.2.0",
+  "python-dotenv>=1.0.1",
+  "psycopg[binary,pool]>=3.1.0",
+]
+
+[project.scripts]
+tw-stock-rawdata = "tw_stock_rawdata.run:main"
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require database or network access",
+]
+
+[tool.ruff]
+line-length = 100
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
