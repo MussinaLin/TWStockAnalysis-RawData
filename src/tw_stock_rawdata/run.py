@@ -14,9 +14,11 @@ from .config import AppConfig
 from .db import close_pool, get_pool, init_schema
 from .db_utils import (
     correct_prev_margin_balance,
+    find_consensus_prev_trade_date,
     get_enabled_stocks,
     load_stock_names,
     load_stock_shares,
+    update_prev_day_margin_batch,
     upsert_daily_raw,
     upsert_market_daily,
     upsert_stock_shares,
@@ -784,7 +786,84 @@ def _run_for_date(
     # Fetch and upsert market daily data (大盤行情)
     _fetch_and_upsert_market_daily(session, date, config)
 
+    # Daily 模式（非 backfill）下，用 MoneyDJ 修正 D-1 個股融資融券
+    # backfill 已透過 _prefetch_margin_cache 預取修正版，不需再修
+    if margin_cache is None:
+        _refresh_prev_day_margin(session, holdings, date, config)
+
     return True
+
+
+_PREV_MARGIN_FIELDS = [
+    "margin_buy", "margin_sell", "margin_balance", "margin_change",
+    "short_sell", "short_buy", "short_balance", "short_change",
+    "short_margin_ratio",
+]
+
+
+def _refresh_prev_day_margin(
+    session: requests.Session,
+    holdings: pd.DataFrame,
+    current_date: dt.date,
+    config: AppConfig,
+) -> None:
+    """用 MoneyDJ 修正 stock_daily_raw 上 D-1 的融資融券欄位。
+
+    TWSE/TPEX 個股當日 OpenAPI 拿到的 margin/short 為速報版，隔天會被修正；
+    MoneyDJ 提供修正後的最終版本。本 function 在 daily 模式下執行，
+    依 holdings 對每支股票打 MoneyDJ 拿 D-1 資料並覆寫。
+
+    跳過條件（任一）：
+    - DB 找不到 D-1 row（completely empty / brand new install）
+    - holdings 為空
+    """
+    if holdings.empty:
+        return
+
+    prev_date = find_consensus_prev_trade_date(config.database_url, current_date)
+    if prev_date is None:
+        print(
+            f"  無 D-1 共識交易日（stock_daily_raw 與 market_daily 兩邊不一致或缺日），"
+            f"略過 {current_date} 的融資融券修正"
+        )
+        return
+
+    total = len(holdings)
+    print(f"  開始修正 D-1 ({prev_date}) 融資融券資料（{total} 檔）...")
+
+    updates: list[tuple[str, dt.date, dict]] = []
+    n_failed = 0
+    for idx, item in holdings.iterrows():
+        symbol = str(item["symbol"]).strip()
+        try:
+            raw = fetch_moneydj_margin(session, symbol, prev_date, prev_date)
+            df = prepare_moneydj_margin(raw)
+        except (DataUnavailableError, requests.RequestException) as exc:
+            n_failed += 1
+            print(f"    {idx + 1}/{total} {symbol} MoneyDJ 取得失敗：{exc}")
+            continue
+
+        row = df.loc[df["date"] == prev_date]
+        if row.empty:
+            continue
+
+        r = row.iloc[0]
+        data: dict[str, object] = {}
+        for col in _PREV_MARGIN_FIELDS:
+            val = r.get(col) if col in r else None
+            if val is None or pd.isna(val):
+                data[col] = None
+            elif col == "short_margin_ratio":
+                data[col] = float(val)
+            else:
+                data[col] = int(val)
+        updates.append((symbol, prev_date, data))
+
+    n_updated = update_prev_day_margin_batch(config.database_url, updates)
+    print(
+        f"  D-1 ({prev_date}) 融資融券修正：更新 {n_updated} 筆，"
+        f"取得 {len(updates)} 筆，失敗 {n_failed} 筆"
+    )
 
 
 def _fetch_and_upsert_market_daily(
@@ -1066,15 +1145,22 @@ def _main_inner(
         )
 
         sheet_names = set()  # 不需 dedup（force 模式忽略，沒 force 也沒 skip 邏輯）
+        any_written = False
         for date in backfill_dates:
-            _run_for_date(
+            if _run_for_date(
                 session, date, stocks_holdings, sheet_names, twse_month_cache,
                 config, today, skip_existing=False,
                 issued_shares=issued_shares,
                 margin_cache=margin_cache,
                 holding_pct_cache=holding_pct_cache,
                 name_map=name_map,
-            )
+            ):
+                any_written = True
+        # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ
+        # 修正版，但實際左邊界前一天不在 prefetch 範圍內，可能仍是 provisional）
+        # 使用 backfill_dates[0]（_build_date_range 已正規化 reversed/one-sided 輸入）
+        if any_written:
+            _refresh_prev_day_margin(session, stocks_holdings, backfill_dates[0], config)
         return
 
     # Load enabled stocks from DB
@@ -1107,8 +1193,9 @@ def _main_inner(
         holding_pct_cache = _prefetch_holding_pct_cache(session, holdings, start_date, end_date)
 
         sheet_names = set()
+        any_written = False
         for date in backfill_dates:
-            _run_for_date(
+            if _run_for_date(
                 session, date, holdings, sheet_names, twse_month_cache,
                 config, today,
                 skip_existing=not args.force,
@@ -1116,7 +1203,13 @@ def _main_inner(
                 margin_cache=margin_cache,
                 holding_pct_cache=holding_pct_cache,
                 name_map=name_map,
-            )
+            ):
+                any_written = True
+        # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ
+        # 修正版，但實際左邊界前一天不在 prefetch 範圍內，可能仍是 provisional）
+        # 使用 backfill_dates[0]（_build_date_range 已正規化 reversed/one-sided 輸入）
+        if any_written:
+            _refresh_prev_day_margin(session, holdings, backfill_dates[0], config)
         return
 
     # Single date mode (today / --date)

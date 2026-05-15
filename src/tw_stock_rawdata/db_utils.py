@@ -211,6 +211,64 @@ def upsert_daily_raw(
         conn.commit()
 
 
+_PREV_MARGIN_COLS = [
+    "margin_buy", "margin_sell", "margin_balance", "margin_change",
+    "short_sell", "short_buy", "short_balance", "short_change",
+    "short_margin_ratio",
+]
+
+
+def find_consensus_prev_trade_date(
+    database_url: str, current_date: dt.date
+) -> dt.date | None:
+    """找 stock_daily_raw 與 market_daily 兩邊都同意的 D-1。
+
+    若兩邊 MAX(trade_date) < current_date 不一致（任一邊缺日），回傳 None。
+    呼叫端在 None 時應跳過修正，避免 gap 情境下把資料寫到錯誤的歷史 row。
+    """
+    pool = get_pool(database_url)
+    with pool.connection() as conn, conn.cursor() as cur:
+        return _consensus_prev_trade_date(cur, current_date)
+
+
+def update_prev_day_margin_batch(
+    database_url: str,
+    updates: list[tuple[str, dt.date, dict]],
+) -> int:
+    """批次覆寫 stock_daily_raw 的 margin/short 欄位。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        updates: list of (symbol, trade_date, data_dict)。
+                 data_dict 鍵：margin_buy / margin_sell / margin_balance / margin_change
+                 / short_sell / short_buy / short_balance / short_change /
+                 short_margin_ratio。MoneyDJ 為權威來源，None 直接覆寫 NULL。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計（不存在的 (symbol, trade_date) 不算）。
+    """
+    if not updates:
+        return 0
+
+    set_clause = ", ".join(f"{c} = %s" for c in _PREV_MARGIN_COLS)
+    sql = (
+        f"UPDATE stock_daily_raw SET {set_clause}"
+        f" WHERE symbol = %s AND trade_date = %s"
+    )
+
+    n_updated = 0
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            for symbol, trade_date, data in updates:
+                params = [_safe(data.get(c)) for c in _PREV_MARGIN_COLS]
+                params.extend([symbol, trade_date])
+                cur.execute(sql, params)
+                n_updated += cur.rowcount
+        conn.commit()
+    return n_updated
+
+
 # ---------------------------------------------------------------------------
 # market_daily
 # ---------------------------------------------------------------------------
