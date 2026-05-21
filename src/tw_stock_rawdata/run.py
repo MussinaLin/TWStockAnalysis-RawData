@@ -801,6 +801,22 @@ _PREV_MARGIN_FIELDS = [
 ]
 
 
+def _expected_prev_trade_date(current_date: dt.date) -> dt.date:
+    """日曆上的 D-1，只處理週末（不處理 holiday）。
+
+    - 週一 → 上週五（-3）
+    - 週日 → 上週五（-2，防呆）
+    - 週六 → 週五（-1，防呆）
+    - 其他 → -1
+    """
+    weekday = current_date.weekday()
+    if weekday == 0:
+        return current_date - dt.timedelta(days=3)
+    if weekday == 6:
+        return current_date - dt.timedelta(days=2)
+    return current_date - dt.timedelta(days=1)
+
+
 def _refresh_prev_day_margin(
     session: requests.Session,
     holdings: pd.DataFrame,
@@ -825,6 +841,14 @@ def _refresh_prev_day_margin(
         print(
             f"  無 D-1 共識交易日（stock_daily_raw 與 market_daily 兩邊不一致或缺日），"
             f"略過 {current_date} 的融資融券修正"
+        )
+        return
+
+    expected_prev = _expected_prev_trade_date(current_date)
+    if prev_date != expected_prev:
+        print(
+            f"  DB D-1 ({prev_date}) 不等於 {current_date} 的日曆 D-1 ({expected_prev})，"
+            f"略過融資融券修正（可能是部分回補狀態）"
         )
         return
 
