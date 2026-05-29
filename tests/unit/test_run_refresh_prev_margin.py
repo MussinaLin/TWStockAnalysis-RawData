@@ -162,6 +162,42 @@ def test_refresh_prev_day_margin_skips_when_consensus_none(monkeypatch, capsys):
     assert fetch_calls == []
 
 
+def test_refresh_prev_day_margin_uses_date_range_not_single_day(monkeypatch):
+    """Regression: MoneyDJ margin 對 c==d 只回 summary，必須以區間查詢。"""
+    current = dt.date(2026, 5, 20)
+    prev_date = dt.date(2026, 5, 19)
+
+    monkeypatch.setattr(
+        run, "find_consensus_prev_trade_date", lambda _url, _d: prev_date
+    )
+
+    captured: list[tuple[dt.date, dt.date]] = []
+
+    def fake_fetch(_session, _symbol, start, end):
+        captured.append((start, end))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(run, "fetch_moneydj_margin", fake_fetch)
+    monkeypatch.setattr(
+        run, "prepare_moneydj_margin",
+        lambda _raw: pd.DataFrame(columns=["date", *run._PREV_MARGIN_FIELDS]),
+    )
+    monkeypatch.setattr(run, "update_prev_day_margin_batch", lambda _u, _x: 0)
+
+    run._refresh_prev_day_margin(
+        session=object(),
+        holdings=_holdings(["2330"]),
+        current_date=current,
+        config=_config(),
+    )
+
+    assert len(captured) == 1
+    start, end = captured[0]
+    assert end == prev_date
+    assert start < prev_date, "start 必須早於 prev_date，避免單日查詢"
+    assert (prev_date - start).days >= 7, "緩衝範圍至少 7 天以覆蓋連假"
+
+
 def test_refresh_prev_day_margin_skips_empty_holdings(monkeypatch):
     """Empty holdings: short-circuit before DB call."""
     consensus_calls: list = []

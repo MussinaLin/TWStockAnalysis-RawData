@@ -855,12 +855,16 @@ def _refresh_prev_day_margin(
     total = len(holdings)
     print(f"  開始修正 D-1 ({prev_date}) 融資融券資料（{total} 檔）...")
 
+    # MoneyDJ 融資融券頁面對 c==d 的單日查詢只回 summary row、不含當日資料；
+    # 必須用區間查詢再 filter 出 prev_date。
+    fetch_start = prev_date - dt.timedelta(days=10)
+
     updates: list[tuple[str, dt.date, dict]] = []
     n_failed = 0
     for idx, item in holdings.iterrows():
         symbol = str(item["symbol"]).strip()
         try:
-            raw = fetch_moneydj_margin(session, symbol, prev_date, prev_date)
+            raw = fetch_moneydj_margin(session, symbol, fetch_start, prev_date)
             df = prepare_moneydj_margin(raw)
         except (DataUnavailableError, requests.RequestException) as exc:
             n_failed += 1
