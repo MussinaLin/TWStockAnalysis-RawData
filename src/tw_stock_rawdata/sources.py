@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import io
 import re
+import time
 import urllib3
 from typing import Any
 
@@ -42,6 +44,44 @@ MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
 
 class DataUnavailableError(RuntimeError):
     pass
+
+
+# Retry config for per-date TWSE/TPEX JSON fetches.
+RETRY_ATTEMPTS = 3
+RETRY_BASE_DELAY = 2.0
+
+
+def _retry_on_transient(fn):
+    """Retry a per-date fetch on偶發/格式異常的回應。
+
+    TWSE/TPEX 偶發回傳不一致的 JSON（例如 fields 與 data 欄數不符 → ValueError）或
+    暫時性網路錯誤。重新發一次請求通常就正常，故以 backoff 重試數次。
+    DataUnavailableError（合法的「沒資料/休市」）不重試、立即往上拋。
+
+    用盡所有 attempts 後依例外型別決定處置：
+    - ValueError（格式/解析異常）→ 轉成 DataUnavailableError，讓呼叫端跨過該日而非中斷。
+    - requests.RequestException（網路）→ 原樣重拋，維持呼叫端既有的網路錯誤語意。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        last_exc: Exception | None = None
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                return fn(*args, **kwargs)
+            except DataUnavailableError:
+                raise
+            except (requests.RequestException, ValueError) as exc:
+                last_exc = exc
+                if attempt < RETRY_ATTEMPTS - 1:
+                    time.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+        if isinstance(last_exc, requests.RequestException):
+            raise last_exc
+        raise DataUnavailableError(
+            f"{fn.__name__} 連續 {RETRY_ATTEMPTS} 次取得失敗（疑似偶發 API 異常）：{last_exc}"
+        )
+
+    return wrapper
 
 
 def _parse_roc_date(value: str) -> dt.date | None:
@@ -213,6 +253,7 @@ def _read_tpex_csv(text: str) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(csv_text))
 
 
+@_retry_on_transient
 def fetch_twse_stock_day(
     session: requests.Session,
     stock_no: str,
@@ -287,6 +328,7 @@ def find_twse_ohlcv(
     return open_price, high_price, low_price, close_price, volume
 
 
+@_retry_on_transient
 def fetch_twse_t86(session: requests.Session, date: dt.date) -> pd.DataFrame:
     """Fetch institutional investor buy/sell data from TWSE T86 (三大法人買賣超).
 
@@ -344,6 +386,7 @@ def fetch_twse_stock_day_all(session: requests.Session) -> tuple[pd.DataFrame, d
     return pd.DataFrame(payload), data_date
 
 
+@_retry_on_transient
 def fetch_twse_mi_index(session: requests.Session, date: dt.date) -> tuple[pd.DataFrame, dt.date | None]:
     """Fetch market index data from TWSE MI_INDEX (fallback for individual stock OHLCV).
 
@@ -380,6 +423,7 @@ def fetch_twse_mi_index(session: requests.Session, date: dt.date) -> tuple[pd.Da
     return _extract_twse_table(payload), data_date
 
 
+@_retry_on_transient
 def fetch_tpex_daily_quotes(
     session: requests.Session,
     date: dt.date | None = None,
@@ -413,6 +457,7 @@ def fetch_tpex_daily_quotes(
     return df, data_date
 
 
+@_retry_on_transient
 def fetch_tpex_3insti(
     session: requests.Session,
     date: dt.date | None = None,
@@ -462,6 +507,7 @@ def _extract_tpex_v2_table(
     raise DataUnavailableError(f"TPEX V2 找不到包含「{title_keyword}」的表格。")
 
 
+@_retry_on_transient
 def fetch_tpex_daily_quotes_v2(
     session: requests.Session,
     date: dt.date,
@@ -482,6 +528,7 @@ def fetch_tpex_daily_quotes_v2(
     return df, data_date
 
 
+@_retry_on_transient
 def fetch_tpex_3insti_v2(
     session: requests.Session,
     date: dt.date,
