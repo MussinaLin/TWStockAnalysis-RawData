@@ -584,8 +584,14 @@ def _run_for_date(
     margin_cache: dict[str, dict[dt.date, dict]] | None = None,
     holding_pct_cache: dict[str, dict[dt.date, dict]] | None = None,
     name_map: dict[str, str] | None = None,
+    write_market_daily: bool = True,
 ) -> bool:
-    """Process data for a single date."""
+    """Process data for a single date.
+
+    write_market_daily: 是否寫入全市場大盤資料 (market_daily)。market_daily 以
+    trade_date 為鍵、與個股無關；--backfill-stocks（特定股票回補）會傳 False，
+    避免對共用的大盤表產生非預期副作用。一般日期範圍回補與 daily 模式維持 True。
+    """
     sheet_name = date.isoformat()
     print(f"開始處理日期 {sheet_name}")
 
@@ -783,8 +789,10 @@ def _run_for_date(
 
     upsert_daily_raw(config.database_url, date, output_df)
 
-    # Fetch and upsert market daily data (大盤行情)
-    _fetch_and_upsert_market_daily(session, date, config)
+    # Fetch and upsert market daily data (大盤行情)。market_daily 與個股無關，
+    # 特定股票回補 (--backfill-stocks) 不需更新，避免對共用大盤表的非預期副作用。
+    if write_market_daily:
+        _fetch_and_upsert_market_daily(session, date, config)
 
     # Daily 模式（非 backfill）下，用 MoneyDJ 修正 D-1 個股融資融券
     # backfill 已透過 _prefetch_margin_cache 預取修正版，不需再修
@@ -1182,6 +1190,7 @@ def _main_inner(
                 margin_cache=margin_cache,
                 holding_pct_cache=holding_pct_cache,
                 name_map=name_map,
+                write_market_daily=False,
             ):
                 any_written = True
         # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ
