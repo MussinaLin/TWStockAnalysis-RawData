@@ -680,3 +680,55 @@ def prepare_moneydj_holding_pct(df: pd.DataFrame) -> pd.DataFrame:
     result = result.dropna(subset=["date"])
 
     return result
+
+
+# 大戶門檻：400 張 = 400,000 股。TDCC 分級在 400,000/400,001 之間切開，
+# 故「400 張以上」= 分級下界 >= 400,001 的所有級距（400,001-600,000 起算）。
+_MAJOR_HOLDER_MIN_SHARES = 400_001
+
+
+def prepare_tdcc_major_holder_ratio(df: pd.DataFrame) -> float | None:
+    """Compute 大戶持股佔比 from a TDCC 集保戶股權分散表 DataFrame.
+
+    加總「持股/單位數分級」下界 >= 400,001 股（即 400 張以上）的「占集保庫存數比例」，
+    自動排除「差異數調整」「合計」等無數字下界的列，回傳比例小數（如 0.7572）。
+
+    Returns:
+        ratio as decimal rounded to 6 places (e.g. 0.7572); None if columns missing.
+    """
+    grade_col = _find_column(df, ["持股"])
+    pct_col = _find_column(df, ["占集保庫存數比例"])
+    if not grade_col or not pct_col:
+        return None
+
+    def _grade_lower_bound(val) -> int | None:
+        if pd.isna(val):
+            return None
+        match = re.match(r"^([\d,]+)", str(val).strip())
+        if not match:
+            return None
+        try:
+            return int(match.group(1).replace(",", ""))
+        except ValueError:
+            return None
+
+    total_pct = 0.0
+    n_parsed = 0
+    for _, row in df.iterrows():
+        lower = _grade_lower_bound(row[grade_col])
+        if lower is None or lower < _MAJOR_HOLDER_MIN_SHARES:
+            continue
+        # TDCC 多以裸數字回傳，但保險起見先去掉可能存在的 "%"（字串值才需處理）。
+        raw_pct = row[pct_col]
+        pct = _clean_number(raw_pct.replace("%", "") if isinstance(raw_pct, str) else raw_pct)
+        if pct is not None:
+            total_pct += pct
+            n_parsed += 1
+
+    # 沒有任何一個 >= 400 張的級距解析出比例（欄位改版 / "--" / 空白）時，回 None
+    # 表示「無法解析」，避免把假性的 0.0 寫進 stock_major_holder；
+    # 真實的 0.00% 級距仍會被計入（n_parsed > 0）而正確回傳 0.0。
+    if n_parsed == 0:
+        return None
+
+    return round(total_pct / 100, 6)

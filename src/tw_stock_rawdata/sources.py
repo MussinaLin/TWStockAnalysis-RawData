@@ -40,6 +40,7 @@ TPEX_MARGIN_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_bala
 TPEX_MARGIN_V2_URL = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
 MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
 MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
+TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
 
 
 class DataUnavailableError(RuntimeError):
@@ -1010,3 +1011,104 @@ def fetch_twse_market_margin(
     resp = session.get(TWSE_MARKET_MARGIN_URL, params=params, timeout=30, verify=False)
     resp.raise_for_status()
     return _parse_market_margin_payload(resp.json())
+
+
+# ---------------------------------------------------------------------------
+# TDCC 集保戶股權分散表（大戶持股佔比）fetch functions
+# ---------------------------------------------------------------------------
+
+_TDCC_TOKEN_RE = re.compile(
+    r'name="SYNCHRONIZER_TOKEN"[^>]*value="([^"]*)"'
+)
+_TDCC_DATE_OPTION_RE = re.compile(r'<option[^>]*value="(\d{8})"')
+
+
+def fetch_tdcc_token_and_dates(
+    session: requests.Session,
+) -> tuple[str, list[dt.date]]:
+    """GET the TDCC qryStock page; return (synchronizer_token, available_dates).
+
+    available_dates 是 scaDate 下拉選單中所有可查的週資料日期（皆為週五結算日），
+    由新到舊排序。token 為 CSRF synchronizer token，需帶入後續 POST。
+    """
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    resp = session.get(TDCC_QRY_STOCK_URL, timeout=30, verify=False)
+    resp.raise_for_status()
+
+    token_match = _TDCC_TOKEN_RE.search(resp.text)
+    if not token_match:
+        raise DataUnavailableError("TDCC 頁面找不到 SYNCHRONIZER_TOKEN")
+    token = token_match.group(1)
+
+    dates: list[dt.date] = []
+    seen: set[dt.date] = set()
+    for raw in _TDCC_DATE_OPTION_RE.findall(resp.text):
+        parsed = _parse_date_any(raw)
+        if parsed and parsed not in seen:
+            seen.add(parsed)
+            dates.append(parsed)
+    if not dates:
+        raise DataUnavailableError("TDCC 頁面找不到可查詢日期")
+
+    return token, dates
+
+
+def fetch_tdcc_distribution(
+    session: requests.Session,
+    token: str,
+    symbol: str,
+    date: dt.date,
+) -> tuple[pd.DataFrame, str]:
+    """Fetch TDCC 集保戶股權分散表 for a single stock and date.
+
+    重點：
+    - firDate 必須等於 scaDate（查詢日），否則 TDCC 回「查無此資料」。
+    - SYNCHRONIZER_TOKEN 為單次有效：每次 POST 的回應都帶一個全新的 token，
+      連續查詢時必須用「上一次回應回傳的新 token」，否則第二次起會回「查無此資料」。
+
+    Returns:
+        (分散表 DataFrame, next_token)。DataFrame 欄位含「持股/單位數分級」
+        「占集保庫存數比例 (%)」等，通常 17 列（15 個分級 + 差異數調整 + 合計）；
+        next_token 供呼叫端鏈接下一次查詢。
+        查無資料或解析失敗 → DataUnavailableError。
+    """
+    date_str = date.strftime("%Y%m%d")
+    data = {
+        "SYNCHRONIZER_TOKEN": token,
+        "SYNCHRONIZER_URI": "/portal/zh/smWeb/qryStock",
+        "method": "submit",
+        "firDate": date_str,
+        "scaDate": date_str,
+        "sqlMethod": "StockNo",
+        "stockNo": symbol,
+        "stockName": "",
+    }
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    resp = session.post(TDCC_QRY_STOCK_URL, data=data, timeout=30, verify=False)
+    resp.raise_for_status()
+
+    # 取出回應內的新 token 供下一次查詢使用；找不到就退回沿用舊 token。
+    token_match = _TDCC_TOKEN_RE.search(resp.text)
+    next_token = token_match.group(1) if token_match else token
+
+    try:
+        tables = pd.read_html(io.StringIO(resp.text))
+    except ValueError as exc:
+        raise DataUnavailableError(f"TDCC {symbol} {date_str} 頁面解析失敗：{exc}") from exc
+
+    distribution = None
+    for table in tables:
+        joined = "".join(str(c) for c in table.columns)
+        if "持股" in joined and "占集保庫存數比例" in joined:
+            distribution = table
+            break
+
+    if distribution is None:
+        raise DataUnavailableError(f"TDCC {symbol} {date_str} 找不到股權分散表")
+
+    # 「查無此資料」會回傳一個欄位相符、但只有單列佔位字串的表，須視為無資料。
+    body = distribution.to_string()
+    if "查無此資料" in body or len(distribution) < 2:
+        raise DataUnavailableError(f"TDCC {symbol} {date_str} 查無此資料")
+
+    return distribution, next_token

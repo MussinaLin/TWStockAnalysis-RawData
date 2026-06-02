@@ -20,12 +20,14 @@ from .db_utils import (
     load_stock_shares,
     update_prev_day_margin_batch,
     upsert_daily_raw,
+    upsert_major_holder_ratio,
     upsert_market_daily,
     upsert_stock_shares,
 )
 from .prepare import (
     prepare_moneydj_holding_pct,
     prepare_moneydj_margin,
+    prepare_tdcc_major_holder_ratio,
     prepare_tpex_3insti,
     prepare_tpex_issued_shares,
     prepare_tpex_margin,
@@ -41,6 +43,8 @@ from .sources import (
     DataUnavailableError,
     fetch_moneydj_holding_pct,
     fetch_moneydj_margin,
+    fetch_tdcc_distribution,
+    fetch_tdcc_token_and_dates,
     fetch_tpex_3insti_v2,
     fetch_tpex_company_basic,
     fetch_tpex_daily_quotes_v2,
@@ -154,6 +158,147 @@ def _update_shares_command(
     print(f"update-shares 總耗時 {time.monotonic() - t_start:.1f}s")
 
 
+# TDCC 單支查詢的重試設定：暫時性網路錯誤或 token 過期（回「查無此資料」）時，
+# 換新 token 後再試，避免單次異常永久漏掉某 (symbol, date)。
+_TDCC_MAX_ATTEMPTS = 3
+_TDCC_RETRY_DELAY = 1.5
+
+
+def _resolve_dahu_dates(
+    available_dates: list[dt.date],
+    from_date: dt.date | None,
+    to_date: dt.date | None,
+) -> list[dt.date]:
+    """決定 --dahu 要更新哪些 TDCC 週資料日期。
+
+    - 有 --from/--to：取 available_dates 中落在 [from, to] 區間者（含端點）。
+      只給單邊時，另一邊不設限。
+    - 都沒給：只取最新一筆（available_dates 由新到舊排序，取第一筆）。
+
+    回傳由舊到新排序，方便依序回補。
+    """
+    if from_date is None and to_date is None:
+        # 明確取最新一週，不依賴 TDCC 頁面 option 的排列順序。
+        return [max(available_dates)] if available_dates else []
+
+    # 與 _build_date_range 一致：兩邊都給且顛倒時自動對調，避免吞掉合法區間。
+    if from_date is not None and to_date is not None and from_date > to_date:
+        from_date, to_date = to_date, from_date
+
+    lo = from_date or dt.date.min
+    hi = to_date or dt.date.max
+    selected = [d for d in available_dates if lo <= d <= hi]
+    return sorted(selected)
+
+
+def _fetch_tdcc_with_retry(
+    session: requests.Session,
+    token: str,
+    symbol: str,
+    date: dt.date,
+) -> tuple[pd.DataFrame | None, str, Exception | None]:
+    """以重試包裝 fetch_tdcc_distribution。
+
+    暫時性網路錯誤、或 token 過期導致的「查無此資料」，換新 token 後再試，
+    避免單次上游異常永久漏掉某 (symbol, date)。
+
+    Returns:
+        (distribution_or_None, token, last_exc)。成功時 distribution 非 None、
+        token 為最新可用 token；全部嘗試失敗時 distribution 為 None。
+    """
+    import time
+
+    last_exc: Exception | None = None
+    for attempt in range(_TDCC_MAX_ATTEMPTS):
+        try:
+            # token 為單次有效，鏈接每次回應回傳的新 token。
+            dist, token = fetch_tdcc_distribution(session, token, symbol, date)
+            return dist, token, None
+        except (DataUnavailableError, requests.RequestException) as exc:
+            last_exc = exc
+            # 失敗時手上的 token 已消耗/狀態未知，換一個新的再試。
+            try:
+                token, _ = fetch_tdcc_token_and_dates(session)
+            except (DataUnavailableError, requests.RequestException):
+                pass
+            if attempt < _TDCC_MAX_ATTEMPTS - 1:
+                time.sleep(_TDCC_RETRY_DELAY * (attempt + 1))
+
+    return None, token, last_exc
+
+
+def _dahu_command(
+    session: requests.Session,
+    config: AppConfig,
+    args: argparse.Namespace,
+    today: dt.date,
+) -> None:
+    """--dahu：更新大戶持股佔比（TDCC 集保戶股權分散表），其他資料不更新。"""
+    db_url = config.database_url
+
+    # 決定目標股票
+    if args.stocks:
+        symbols = [s.strip() for s in args.stocks.split(",") if s.strip()]
+        if not symbols:
+            print("錯誤：--stocks 未指定任何股票代號")
+            return
+        name_map = load_stock_names(db_url)
+        holdings = [(s, name_map.get(s, "")) for s in symbols]
+    else:
+        enabled_rows = get_enabled_stocks(db_url)
+        if not enabled_rows:
+            print("錯誤：資料庫中無啟用的股票（stocks.enabled = TRUE）")
+            return
+        holdings = [(r[0], r[1]) for r in enabled_rows]
+
+    # 解析區間（若有）
+    from_date = _parse_date(args.from_date) if args.from_date else None
+    to_date = _parse_date(args.to_date) if args.to_date else None
+
+    # 取得 TDCC token 與可查日期
+    try:
+        token, available_dates = fetch_tdcc_token_and_dates(session)
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"取得 TDCC 頁面失敗：{exc}")
+        return
+
+    target_dates = _resolve_dahu_dates(available_dates, from_date, to_date)
+    if not target_dates:
+        print("區間內無可查的 TDCC 週資料日期，未更新")
+        return
+
+    print(
+        f"更新大戶持股佔比：{len(holdings)} 檔 × {len(target_dates)} 個日期"
+        f"（{target_dates[0]} ~ {target_dates[-1]}）"
+    )
+
+    total_stocks = len(holdings)
+    for date in target_dates:
+        rows: list[tuple[str, str | None, float | None]] = []
+        n_failed = 0
+        for idx, (symbol, name) in enumerate(holdings):
+            print(f"  {date.isoformat()} {idx + 1}/{total_stocks} {symbol}")
+            dist, token, last_exc = _fetch_tdcc_with_retry(session, token, symbol, date)
+            if dist is None:
+                n_failed += 1
+                print(
+                    f"    {symbol} TDCC 取得失敗（重試 {_TDCC_MAX_ATTEMPTS} 次）：{last_exc}"
+                )
+                continue
+
+            ratio = prepare_tdcc_major_holder_ratio(dist)
+            if ratio is None:
+                n_failed += 1
+                print(f"    {symbol} 無法解析大戶持股佔比")
+                continue
+            rows.append((symbol, name or None, ratio))
+
+        n_written = upsert_major_holder_ratio(db_url, date, rows)
+        print(
+            f"  {date.isoformat()} 大戶持股佔比已寫入 {n_written} 筆，失敗 {n_failed} 筆"
+        )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="台股每日 raw data 抓取")
     parser.add_argument("--date", type=str, help="指定日期 (YYYY-MM-DD)")
@@ -166,6 +311,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--update-shares", action="store_true",
         help="更新發行股數至資料庫",
+    )
+    parser.add_argument(
+        "--dahu", action="store_true",
+        help="只更新大戶持股佔比（TDCC 集保戶股權分散表，每週一次），其他資料不更新",
+    )
+    parser.add_argument(
+        "--stocks", type=str, default=None,
+        help="搭配 --dahu：只更新特定股票（逗號分隔，例：2330,2303）",
+    )
+    parser.add_argument(
+        "--from", dest="from_date", type=str, default=None,
+        help="搭配 --dahu：更新區間起始日（YYYY-MM-DD，對應到區間內的週資料日）",
+    )
+    parser.add_argument(
+        "--to", dest="to_date", type=str, default=None,
+        help="搭配 --dahu：更新區間結束日（YYYY-MM-DD）",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -1147,6 +1308,11 @@ def _main_inner(
     # --update-shares mode
     if args.update_shares:
         _update_shares_command(session, config)
+        return
+
+    # --dahu mode：只更新大戶持股佔比，其他資料不更新
+    if args.dahu:
+        _dahu_command(session, config, args, today)
         return
 
     # --backfill-stocks mode
