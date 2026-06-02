@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import io
+import random
 import re
 import time
 import urllib3
@@ -46,42 +47,84 @@ class DataUnavailableError(RuntimeError):
     pass
 
 
-# Retry config for per-date TWSE/TPEX JSON fetches.
-RETRY_ATTEMPTS = 3
+# Retry config for the once-per-date TWSE/TPEX fetches (T86 / MI_INDEX / TPEX quotes & 3insti).
+# 窗口需撐得過 TPEX/Cloudflare 暫時性 5xx（例如 520，常需數十秒才恢復），
+# 故 attempts 拉到 6、單次 backoff 以 max_delay 設上限，再疊加 additive jitter 去同步化固定間隔。
+# deterministic capped delays 為 [2,4,8,16,16]（5 次 sleep）≈ 46s 保底，加 jitter 後上限 ~56s 才放棄。
+# 註：超過分鐘級的長時間中斷不在此處理——當天 OTC 視為缺漏、由後續回補補齊（與既有 skip 語意一致）。
+RETRY_ATTEMPTS = 6
 RETRY_BASE_DELAY = 2.0
+RETRY_MAX_DELAY = 16.0
+# Additive jitter（上限秒數）疊加在 deterministic backoff 之上——只會等更久、不會更短，
+# 故不會縮短任何 profile 既有的重試窗口，只用來打散固定間隔避免每次撞同一台復原中的伺服器。
+RETRY_JITTER = 2.0
+
+# 較短的 retry profile，給「每檔個股各打一次」的 fetch_twse_stock_day 使用。
+# 該函式在 _build_daily_rows 內對每個 holding 呼叫一次，若套用上面的長窗口，
+# 單一上游中斷會被乘上數百檔 → 整批 stall 數小時。deterministic delays 為 [2,4]，
+# 保留原本約 6s 的短窗口（additive jitter 只會略為加長，不會提早放棄）。
+PER_SYMBOL_RETRY_ATTEMPTS = 3
+PER_SYMBOL_RETRY_MAX_DELAY = 8.0
 
 
-def _retry_on_transient(fn):
-    """Retry a per-date fetch on偶發/格式異常的回應。
+def _retry_backoff_delay(attempt: int, max_delay: float = RETRY_MAX_DELAY) -> float:
+    """Additive-jitter exponential backoff for retry attempt index (0-based).
+
+    deterministic backoff = min(max_delay, base * 2**attempt)，再疊加 uniform(0, RETRY_JITTER)。
+    additive（而非 equal）jitter 確保等候時間「永遠 ≥ deterministic backoff」，
+    所以不會把既定窗口縮短、讓最後一次重試提早觸發；jitter 只負責打散固定間隔。
+    長 profile 的 deterministic delays 為 [2,4,8,16,16]，總窗口約 46–56s。
+    """
+    base = min(max_delay, RETRY_BASE_DELAY * (2 ** attempt))
+    return base + random.uniform(0, RETRY_JITTER)
+
+
+def _retry_on_transient(
+    fn=None,
+    *,
+    attempts: int = RETRY_ATTEMPTS,
+    max_delay: float = RETRY_MAX_DELAY,
+):
+    """Retry a fetch on偶發/格式異常的回應（可調 attempts 與 backoff 上限）。
 
     TWSE/TPEX 偶發回傳不一致的 JSON（例如 fields 與 data 欄數不符 → ValueError）或
-    暫時性網路錯誤。重新發一次請求通常就正常，故以 backoff 重試數次。
+    暫時性網路錯誤（含 5xx，如 Cloudflare 520）。重新發請求通常就正常，故以 backoff 重試數次。
     DataUnavailableError（合法的「沒資料/休市」）不重試、立即往上拋。
 
     用盡所有 attempts 後依例外型別決定處置：
     - ValueError（格式/解析異常）→ 轉成 DataUnavailableError，讓呼叫端跨過該日而非中斷。
     - requests.RequestException（網路）→ 原樣重拋，維持呼叫端既有的網路錯誤語意。
+
+    可當 bare decorator（`@_retry_on_transient`，用長窗口預設值）或帶參數
+    （`@_retry_on_transient(attempts=..., max_delay=...)`，給 per-symbol 短窗口）使用。
     """
 
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        last_exc: Exception | None = None
-        for attempt in range(RETRY_ATTEMPTS):
-            try:
-                return fn(*args, **kwargs)
-            except DataUnavailableError:
-                raise
-            except (requests.RequestException, ValueError) as exc:
-                last_exc = exc
-                if attempt < RETRY_ATTEMPTS - 1:
-                    time.sleep(RETRY_BASE_DELAY * (2 ** attempt))
-        if isinstance(last_exc, requests.RequestException):
-            raise last_exc
-        raise DataUnavailableError(
-            f"{fn.__name__} 連續 {RETRY_ATTEMPTS} 次取得失敗（疑似偶發 API 異常）：{last_exc}"
-        )
+    def decorate(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exc: Exception | None = None
+            for attempt in range(attempts):
+                try:
+                    return func(*args, **kwargs)
+                except DataUnavailableError:
+                    raise
+                except (requests.RequestException, ValueError) as exc:
+                    last_exc = exc
+                    if attempt < attempts - 1:
+                        time.sleep(_retry_backoff_delay(attempt, max_delay))
+            if isinstance(last_exc, requests.RequestException):
+                raise last_exc
+            raise DataUnavailableError(
+                f"{func.__name__} 連續 {attempts} 次取得失敗（疑似偶發 API 異常）：{last_exc}"
+            )
 
-    return wrapper
+        return wrapper
+
+    # bare usage: @_retry_on_transient
+    if fn is not None:
+        return decorate(fn)
+    # parametrized usage: @_retry_on_transient(attempts=..., max_delay=...)
+    return decorate
 
 
 def _parse_roc_date(value: str) -> dt.date | None:
@@ -253,7 +296,9 @@ def _read_tpex_csv(text: str) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(csv_text))
 
 
-@_retry_on_transient
+@_retry_on_transient(
+    attempts=PER_SYMBOL_RETRY_ATTEMPTS, max_delay=PER_SYMBOL_RETRY_MAX_DELAY
+)
 def fetch_twse_stock_day(
     session: requests.Session,
     stock_no: str,
