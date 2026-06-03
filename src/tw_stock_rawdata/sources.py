@@ -664,6 +664,7 @@ def _parse_roc_date_compact(value: str) -> dt.date | None:
         return None
 
 
+@_retry_on_transient
 def fetch_twse_margin(session: requests.Session) -> tuple[pd.DataFrame, dt.date | None]:
     """Fetch TWSE margin trading data for all listed stocks (today only).
 
@@ -689,6 +690,7 @@ def fetch_twse_margin(session: requests.Session) -> tuple[pd.DataFrame, dt.date 
     return pd.DataFrame(payload), None
 
 
+@_retry_on_transient
 def fetch_tpex_margin(session: requests.Session) -> tuple[pd.DataFrame, dt.date | None]:
     """Fetch TPEX margin trading data for all OTC stocks (today only).
 
@@ -727,6 +729,7 @@ def fetch_tpex_margin(session: requests.Session) -> tuple[pd.DataFrame, dt.date 
     return pd.DataFrame(payload), data_date
 
 
+@_retry_on_transient
 def fetch_tpex_margin_v2(
     session: requests.Session,
     date: dt.date,
@@ -751,6 +754,9 @@ def fetch_tpex_margin_v2(
     return df, data_date
 
 
+@_retry_on_transient(
+    attempts=PER_SYMBOL_RETRY_ATTEMPTS, max_delay=PER_SYMBOL_RETRY_MAX_DELAY
+)
 def fetch_moneydj_margin(
     session: requests.Session,
     symbol: str,
@@ -780,11 +786,11 @@ def fetch_moneydj_margin(
     response = session.get(MONEYDJ_MARGIN_URL, params=params, timeout=30, verify=False)
     response.raise_for_status()
 
-    # Parse HTML tables
-    try:
-        tables = pd.read_html(io.StringIO(response.text), encoding="utf-8")
-    except ValueError as exc:
-        raise DataUnavailableError(f"MoneyDJ 融資融券頁面解析失敗：{exc}") from exc
+    # Parse HTML tables。
+    # 不在此攔截 read_html 的 ValueError：讓它往上拋給 _retry_on_transient 重試
+    # （MoneyDJ 偶發回傳壞/不完整 HTML 的暫時性情境）；用盡 retry 後 decorator 會
+    # 把 ValueError 轉成 DataUnavailableError，呼叫端語意不變。
+    tables = pd.read_html(io.StringIO(response.text), encoding="utf-8")
 
     # Find the margin data table - it's typically the largest table with date data
     # MoneyDJ table structure:

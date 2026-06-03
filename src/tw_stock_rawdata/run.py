@@ -210,6 +210,22 @@ def _fetch_twse_3insti(session: requests.Session, date: dt.date) -> pd.DataFrame
     return prepare_twse_3insti(twse_t86)
 
 
+def _stock_sources_ok(
+    *,
+    is_tpex: bool,
+    twse_insti_ok: bool,
+    tpex_insti_ok: bool,
+) -> bool:
+    """單檔個股所依賴的「必要」來源是否都成功（失敗則該檔跳過不寫）。
+
+    必要來源 = OHLC（價格，由呼叫端的無價格判斷另行處理）＋ 三大法人（依市場別）。
+    融資融券「不」納入必要：個股可能不開放融資融券，資料本就可能缺，
+    讓它阻擋會把合法無券資的個股也跳掉。融資融券靠 fetch 層 retry ＋
+    upsert COALESCE（不以 NULL 覆寫舊值）處理，不在此 gating。
+    """
+    return tpex_insti_ok if is_tpex else twse_insti_ok
+
+
 def _build_daily_rows(
     session: requests.Session,
     date: dt.date,
@@ -226,12 +242,27 @@ def _build_daily_rows(
     margin_cache: dict[str, dict[dt.date, dict]] | None = None,
     holding_pct_cache: dict[str, dict[dt.date, dict]] | None = None,
     name_map: dict[str, str] | None = None,
+    twse_insti_ok: bool = True,
+    tpex_insti_ok: bool = True,
 ) -> pd.DataFrame:
-    """Build raw daily rows for stock_daily_raw (no indicators/statistics)."""
+    """Build raw daily rows for stock_daily_raw (no indicators/statistics).
+
+    逐檔跳過（不寫該檔列）條件：
+    1. 無價格（open/close 皆 None）：OHLC 來源對該檔失敗或當天無交易。
+    2. 該檔市場別的三大法人來源 fetch 失敗（見 _stock_sources_ok）。
+    跳過的個股留待重跑 / backfill 補上（搭配 upsert 的 COALESCE）。
+    市場別由「有價格」個股的價格來源判定：該檔出現在 tpex_quotes ⟹ TPEX，否則 TWSE。
+    """
     rows: list[dict] = []
     total = len(holdings)
+    skipped = 0
     if name_map is None:
         name_map = {}
+
+    if not tpex_quotes.empty and "symbol" in tpex_quotes.columns:
+        tpex_symbols = set(tpex_quotes["symbol"].astype(str).str.strip())
+    else:
+        tpex_symbols = set()
 
     for idx, item in holdings.iterrows():
         symbol = str(item["symbol"]).strip()
@@ -244,6 +275,21 @@ def _build_daily_rows(
             tpex_quotes, twse_month_cache,
         )
         open_price, close_price, high_price, low_price, volume = ohlcv
+
+        # 逐檔跳過 1：無價格（OHLC 來源對該檔失敗或當天無交易）
+        if close_price is None and open_price is None:
+            skipped += 1
+            continue
+
+        # 逐檔跳過 2：該檔市場別的三大法人來源失敗（融資融券例外，不 gating）
+        is_tpex = symbol in tpex_symbols
+        if not _stock_sources_ok(
+            is_tpex=is_tpex,
+            twse_insti_ok=twse_insti_ok,
+            tpex_insti_ok=tpex_insti_ok,
+        ):
+            skipped += 1
+            continue
 
         foreign_net, trust_net, dealer_net = _get_institutional_data(
             symbol, twse_3insti, tpex_3insti,
@@ -312,6 +358,12 @@ def _build_daily_rows(
             "foreign_holding_pct": holding_pct.get("foreign_holding_pct"),
             "insti_holding_pct": holding_pct.get("insti_holding_pct"),
         })
+
+    if skipped:
+        print(
+            f"{date.isoformat()} 逐檔跳過 {skipped}/{total} 檔"
+            f"（無價格或三大法人來源失敗），不寫入待重跑/回補"
+        )
 
     return pd.DataFrame(rows)
 
@@ -758,6 +810,11 @@ def _run_for_date(
             except (DataUnavailableError, requests.RequestException):
                 pass
 
+    # 三大法人來源健康度（已過 twse_confirmed，交易日下「空」＝該來源 fetch 失敗）。
+    # 逐檔寫入時用來決定該市場個股是否跳過（融資融券非必要，不納入）。
+    twse_insti_ok = not twse_3insti.empty
+    tpex_insti_ok = not tpex_3insti.empty
+
     # Build daily data
     output_df = _build_daily_rows(
         session=session,
@@ -775,6 +832,8 @@ def _run_for_date(
         margin_cache=margin_cache,
         holding_pct_cache=holding_pct_cache,
         name_map=name_map,
+        twse_insti_ok=twse_insti_ok,
+        tpex_insti_ok=tpex_insti_ok,
     )
 
     if output_df.empty:
@@ -1081,6 +1140,10 @@ def _run_for_date_no_write(
     if holding_pct_cache is None:
         holding_pct_cache = {}
 
+    # 與 _run_for_date 一致：三大法人來源健康度，逐檔跳過用（融資融券非必要，不納入）。
+    twse_insti_ok = not twse_3insti.empty
+    tpex_insti_ok = not tpex_3insti.empty
+
     output_df = _build_daily_rows(
         session=session,
         date=date,
@@ -1097,6 +1160,8 @@ def _run_for_date_no_write(
         margin_cache=margin_cache,
         holding_pct_cache=holding_pct_cache,
         name_map=name_map,
+        twse_insti_ok=twse_insti_ok,
+        tpex_insti_ok=tpex_insti_ok,
     )
 
     if output_df.empty:
