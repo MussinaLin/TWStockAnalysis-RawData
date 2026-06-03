@@ -185,7 +185,15 @@ def upsert_daily_raw(
     trade_date: dt.date,
     df: pd.DataFrame,
 ) -> None:
-    """Upsert daily raw trading data from a DataFrame."""
+    """Upsert daily raw trading data from a DataFrame.
+
+    ON CONFLICT 採 COALESCE(EXCLUDED.col, stock_daily_raw.col)：新值有資料才覆寫，
+    新值為 NULL 時保留 DB 既有值。避免某子來源（法人 / 融資融券 / TPEX）當日暫時性
+    fetch 失敗、整欄變 None 時，把先前抓好的資料蓋成 NULL。非 NULL 的修正照常生效。
+
+    注意：此語意下 --force 回補也無法把欄位清成 NULL（這是刻意的，避免破壞好資料）。
+    需要刻意覆寫 NULL 的情境（如 MoneyDJ 權威修正）走 update_prev_day_margin_batch。
+    """
     if df.empty:
         return
 
@@ -194,7 +202,9 @@ def upsert_daily_raw(
         return
 
     update_cols = [c for c in _RAW_COLUMNS if c not in ("symbol", "trade_date")]
-    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+    set_clause = ", ".join(
+        f"{c} = COALESCE(EXCLUDED.{c}, stock_daily_raw.{c})" for c in update_cols
+    )
     placeholders = ", ".join(["%s"] * len(_RAW_COLUMNS))
     insert_cols = ", ".join(_RAW_COLUMNS)
     sql = (
