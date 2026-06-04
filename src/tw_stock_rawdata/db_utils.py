@@ -315,6 +315,55 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# stock_major_holder (大戶持股佔比)
+# ---------------------------------------------------------------------------
+
+
+def upsert_major_holder_ratio(
+    database_url: str,
+    trade_date: dt.date,
+    rows: list[tuple[str, str | None, float | None]],
+) -> int:
+    """Upsert 大戶持股佔比 rows into stock_major_holder.
+
+    Args:
+        database_url: PostgreSQL connection string.
+        trade_date: TDCC 資料日期（週五結算日）。
+        rows: list of (symbol, name, holding_ratio)。holding_ratio 為小數（如 0.7572）。
+
+    Returns:
+        實際 upsert 的 row 數。
+    """
+    if not rows:
+        return 0
+
+    params = []
+    for symbol, name, ratio in rows:
+        symbol = str(symbol).strip()
+        if not symbol:
+            continue
+        clean_name = None if name is None else str(name).strip() or None
+        params.append((symbol, trade_date, clean_name, _safe(ratio)))
+    if not params:
+        return 0
+
+    sql = (
+        "INSERT INTO stock_major_holder (symbol, trade_date, name, holding_ratio)"
+        " VALUES (%s, %s, %s, %s)"
+        " ON CONFLICT (symbol, trade_date) DO UPDATE SET"
+        "     name = COALESCE(EXCLUDED.name, stock_major_holder.name),"
+        "     holding_ratio = EXCLUDED.holding_ratio"
+    )
+
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, params)
+        conn.commit()
+    return len(params)
+
+
 def _consensus_prev_trade_date(cur, before_date: dt.date) -> dt.date | None:
     """找 stock_daily_raw 與 market_daily 都同意的前一個交易日。
 
