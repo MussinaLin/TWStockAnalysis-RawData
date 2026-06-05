@@ -20,14 +20,15 @@ from .db_utils import (
     load_stock_shares,
     update_prev_day_margin_batch,
     upsert_daily_raw,
-    upsert_major_holder_ratio,
+    upsert_holder_percent,
     upsert_market_daily,
     upsert_stock_shares,
 )
 from .prepare import (
     prepare_moneydj_holding_pct,
     prepare_moneydj_margin,
-    prepare_tdcc_major_holder_ratio,
+    prepare_tdcc_major_ratio,
+    prepare_tdcc_retail_ratio,
     prepare_tpex_3insti,
     prepare_tpex_issued_shares,
     prepare_tpex_margin,
@@ -274,7 +275,7 @@ def _dahu_command(
 
     total_stocks = len(holdings)
     for date in target_dates:
-        rows: list[tuple[str, str | None, float | None]] = []
+        rows: list[tuple[str, str | None, float | None, float | None]] = []
         n_failed = 0
         for idx, (symbol, name) in enumerate(holdings):
             print(f"  {date.isoformat()} {idx + 1}/{total_stocks} {symbol}")
@@ -286,16 +287,18 @@ def _dahu_command(
                 )
                 continue
 
-            ratio = prepare_tdcc_major_holder_ratio(dist)
+            ratio = prepare_tdcc_major_ratio(dist)
             if ratio is None:
                 n_failed += 1
                 print(f"    {symbol} 無法解析大戶持股佔比")
                 continue
-            rows.append((symbol, name or None, ratio))
+            # 散戶比例以同一份分散表解析；偶發 None 不擋寫（COALESCE 保護歷史值）。
+            retail = prepare_tdcc_retail_ratio(dist)
+            rows.append((symbol, name or None, ratio, retail))
 
-        n_written = upsert_major_holder_ratio(db_url, date, rows)
+        n_written = upsert_holder_percent(db_url, date, rows)
         print(
-            f"  {date.isoformat()} 大戶持股佔比已寫入 {n_written} 筆，失敗 {n_failed} 筆"
+            f"  {date.isoformat()} 大戶/散戶持股佔比已寫入 {n_written} 筆，失敗 {n_failed} 筆"
         )
 
 

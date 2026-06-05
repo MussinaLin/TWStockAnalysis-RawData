@@ -316,21 +316,22 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
 
 
 # ---------------------------------------------------------------------------
-# stock_major_holder (大戶持股佔比)
+# stock_holder_percent (大戶 / 散戶持股佔比)
 # ---------------------------------------------------------------------------
 
 
-def upsert_major_holder_ratio(
+def upsert_holder_percent(
     database_url: str,
     trade_date: dt.date,
-    rows: list[tuple[str, str | None, float | None]],
+    rows: list[tuple[str, str | None, float | None, float | None]],
 ) -> int:
-    """Upsert 大戶持股佔比 rows into stock_major_holder.
+    """Upsert 大戶 / 散戶持股佔比 rows into stock_holder_percent.
 
     Args:
         database_url: PostgreSQL connection string.
         trade_date: TDCC 資料日期（週五結算日）。
-        rows: list of (symbol, name, holding_ratio)。holding_ratio 為小數（如 0.7572）。
+        rows: list of (symbol, name, major_ratio, retail_ratio)。
+            major_ratio / retail_ratio 為小數（如 0.7572 / 0.1520），可為 None。
 
     Returns:
         實際 upsert 的 row 數。
@@ -339,21 +340,24 @@ def upsert_major_holder_ratio(
         return 0
 
     params = []
-    for symbol, name, ratio in rows:
+    for symbol, name, ratio, retail in rows:
         symbol = str(symbol).strip()
         if not symbol:
             continue
         clean_name = None if name is None else str(name).strip() or None
-        params.append((symbol, trade_date, clean_name, _safe(ratio)))
+        params.append((symbol, trade_date, clean_name, _safe(ratio), _safe(retail)))
     if not params:
         return 0
 
+    # retail_ratio 用 COALESCE 不覆寫：偶發解析失敗（None）時不可把歷史散戶蓋成 NULL。
     sql = (
-        "INSERT INTO stock_major_holder (symbol, trade_date, name, holding_ratio)"
-        " VALUES (%s, %s, %s, %s)"
+        "INSERT INTO stock_holder_percent"
+        " (symbol, trade_date, name, major_ratio, retail_ratio)"
+        " VALUES (%s, %s, %s, %s, %s)"
         " ON CONFLICT (symbol, trade_date) DO UPDATE SET"
-        "     name = COALESCE(EXCLUDED.name, stock_major_holder.name),"
-        "     holding_ratio = EXCLUDED.holding_ratio"
+        "     name = COALESCE(EXCLUDED.name, stock_holder_percent.name),"
+        "     major_ratio = EXCLUDED.major_ratio,"
+        "     retail_ratio = COALESCE(EXCLUDED.retail_ratio, stock_holder_percent.retail_ratio)"
     )
 
     pool = get_pool(database_url)

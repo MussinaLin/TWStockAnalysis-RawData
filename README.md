@@ -7,7 +7,7 @@
 本 repo 只負責：
 
 - 從 TWSE / TPEX / MoneyDJ / TDCC 抓 raw data
-- 寫入 PostgreSQL：`stocks`、`stock_daily_raw`、`market_daily`、`stock_major_holder`
+- 寫入 PostgreSQL：`stocks`、`stock_daily_raw`、`market_daily`、`stock_holder_percent`
 
 不負責：技術指標、選股、賣出警示、Telegram 通知（由下游 TWStockAnalysis 負責）。
 
@@ -49,7 +49,7 @@ tw-stock-rawdata --backfill-start ... --backfill-end ... --force
 # 刷新 stocks.issued_shares
 tw-stock-rawdata --update-shares
 
-# 更新大戶持股佔比（TDCC 集保戶股權分散表，每週一次；只更新大戶資料，其他不動）
+# 更新大戶/散戶持股佔比（TDCC 集保戶股權分散表，每週一次；只更新此資料，其他不動）
 # 預設只抓最新一筆週資料
 tw-stock-rawdata --dahu
 
@@ -60,7 +60,9 @@ tw-stock-rawdata --dahu --stocks 2330,2303
 tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 ```
 
-> 大戶持股佔比 = 持股 400 張（> 400,000 股）以上占集保庫存數比例，存於 `stock_major_holder.holding_ratio`（小數，如 0.7572）。
+> 大戶持股佔比 = 持股 400 張（> 400,000 股）以上占集保庫存數比例，存於 `stock_holder_percent.major_ratio`（小數，如 0.7572）。
+>
+> 散戶持股佔比 = 持股小於 20 張（<= 20,000 股）占集保庫存數比例，存於 `stock_holder_percent.retail_ratio`（小數，如 0.1520）。兩者皆以 TDCC 分級下界判定，故以「整個級距」分類。
 
 ## Docker
 
