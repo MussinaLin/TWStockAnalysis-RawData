@@ -41,6 +41,7 @@ from .prepare import (
 )
 from .sources import (
     DataUnavailableError,
+    build_session,
     fetch_moneydj_holding_pct,
     fetch_moneydj_margin,
     fetch_tdcc_distribution,
@@ -1367,8 +1368,8 @@ def _main_inner(
     """Inner main logic for RawData."""
     db_url = config.database_url
 
-    session = requests.Session()
-    session.headers.update({"User-Agent": "tw-stock-rawdata/0.1"})
+    # build_session 對 www.twse.com.tw 加最小請求間隔，避免限流回空殼被誤判成沒資料。
+    session = build_session()
 
     # --update-shares mode
     if args.update_shares:

@@ -28,6 +28,13 @@ cp .env.example .env
 # 編輯 .env，填入 PostgreSQL 連線字串
 ```
 
+可選環境變數：
+
+- `TWSE_MIN_INTERVAL`（秒，預設 `1.0`）：對 `www.twse.com.tw` 的請求最小間隔。
+  該站對同 IP 高頻請求會限流，回 HTTP 200 + `{"stat":"很抱歉，沒有符合條件的資料!"}`
+  的空殼（與真休市同字串），導致被誤判成沒資料而跳過。加最小間隔可從源頭避免觸發；
+  若仍偶發，可調大（例如 `1.5`）。僅影響 `www.twse.com.tw`，openapi / TPEX 不受影響。
+
 ## CLI 指令
 
 ```bash

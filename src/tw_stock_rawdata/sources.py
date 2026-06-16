@@ -3,14 +3,17 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import io
+import os
 import random
 import re
+import threading
 import time
 import urllib3
 from typing import Any
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
 
 TWSE_STOCK_DAY_URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
 TWSE_T86_URL = "https://www.twse.com.tw/fund/T86"
@@ -46,6 +49,59 @@ TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
 
 class DataUnavailableError(RuntimeError):
     pass
+
+
+# www.twse.com.tw 對同 IP 高頻請求會限流，但不是回 5xx / 斷線，而是回一個
+# HTTP 200 + {"stat":"很抱歉，沒有符合條件的資料!","total":0} 的空殼——這與「真休市」
+# 的回應逐位元組相同，故 fetcher 會丟 DataUnavailableError，而該例外在 _retry_on_transient
+# 是「不重試直接放棄」→ 限流被誤判成沒資料、整批跳過（使用者感受到「TWSE 常常連線失敗」）。
+# 對策：對 www.twse.com.tw 強制最小請求間隔，從源頭避免觸發限流（不動 retry 語意）。
+TWSE_WWW_PREFIX = "https://www.twse.com.tw"
+DEFAULT_TWSE_MIN_INTERVAL = 1.0
+
+
+class _MinIntervalAdapter(HTTPAdapter):
+    """強制透過此 adapter 送出的請求之間至少間隔 min_interval 秒（序列化 + 最小間隔）。
+
+    間隔以「上一次請求派送時刻」為基準量測；請求本身耗時已自然算進間隔內，
+    min_interval 只是下限。lock 讓多執行緒下仍序列化 pacing（本批次為單執行緒，無妨）。
+    """
+
+    def __init__(self, *args, min_interval: float = DEFAULT_TWSE_MIN_INTERVAL, **kwargs):
+        self._min_interval = max(0.0, min_interval)
+        self._lock = threading.Lock()
+        self._last_ts = 0.0
+        super().__init__(*args, **kwargs)
+
+    def send(self, *args, **kwargs):
+        with self._lock:
+            if self._last_ts:
+                wait = self._min_interval - (time.monotonic() - self._last_ts)
+                if wait > 0:
+                    time.sleep(wait)
+            self._last_ts = time.monotonic()
+        return super().send(*args, **kwargs)
+
+
+def build_session(min_interval: float | None = None) -> requests.Session:
+    """建立帶 www.twse.com.tw pacing 的 HTTP session。
+
+    只對 www.twse.com.tw 加最小請求間隔（避免限流空殼回應，見 _MinIntervalAdapter）；
+    openapi.twse.com.tw / TPEX / MoneyDJ / TDCC 等其他 host 不受影響。
+    min_interval=None 時預設讀環境變數 TWSE_MIN_INTERVAL，否則用 DEFAULT_TWSE_MIN_INTERVAL，
+    讓使用者免改 code 即可調參。
+    """
+    if min_interval is None:
+        raw = os.environ.get("TWSE_MIN_INTERVAL")
+        try:
+            min_interval = float(raw) if raw is not None else DEFAULT_TWSE_MIN_INTERVAL
+        except ValueError:
+            min_interval = DEFAULT_TWSE_MIN_INTERVAL
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "tw-stock-rawdata/0.1"})
+    session.mount(TWSE_WWW_PREFIX, _MinIntervalAdapter(min_interval=min_interval))
+    return session
 
 
 # Retry config for the once-per-date TWSE/TPEX fetches (T86 / MI_INDEX / TPEX quotes & 3insti).
