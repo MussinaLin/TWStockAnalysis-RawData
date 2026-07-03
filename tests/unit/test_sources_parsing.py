@@ -6,6 +6,7 @@ import datetime as dt
 
 import pytest
 
+from tw_stock_rawdata.prepare import prepare_twse_margin
 from tw_stock_rawdata.sources import (
     DataUnavailableError,
     _clean_int,
@@ -16,8 +17,10 @@ from tw_stock_rawdata.sources import (
     _parse_date_any,
     _parse_market_margin_payload,
     _parse_roc_date,
+    _parse_twse_margin_all_payload,
     _read_tpex_csv,
     _roc_to_date,
+    fetch_twse_margin,
 )
 
 
@@ -311,3 +314,143 @@ class TestParseMarketMarginPayload:
     def test_no_matching_row_returns_none(self):
         payload = {"stat": "OK", "tables": [{"data": [["其他項目", "1", "2", "3", "4", "5"]]}]}
         assert _parse_market_margin_payload(payload) is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_twse_margin_all_payload / fetch_twse_margin (dated MI_MARGN, selectType=ALL)
+# ---------------------------------------------------------------------------
+
+_MARGIN_ALL_FIELDS = [
+    "代號", "名稱",
+    "買進", "賣出", "現金償還", "前日餘額", "今日餘額", "次一營業日限額",
+    "買進", "賣出", "現券償還", "前日餘額", "今日餘額", "次一營業日限額",
+    "資券互抵", "註記",
+]
+
+_MARGIN_ALL_ROW = [
+    "2464", "盟立", "1,183", "3,412", "177", "12,777", "10,371", "431,535",
+    "59", "0", "0", "59", "0", "431,535", "17", "X ",
+]
+
+
+def _make_margin_all_payload(**overrides) -> dict:
+    payload = {
+        "stat": "OK",
+        "date": "20260702",
+        "tables": [
+            {
+                "title": "115年07月02日 信用交易統計",
+                "fields": ["項目", "買進", "賣出", "現金(券)償還", "前日餘額", "今日餘額"],
+                "data": [["融資金額(仟元)", "1", "2", "0", "4", "5"]],
+            },
+            {
+                "title": "115年07月02日 融資融券彙總 (全部)",
+                "fields": list(_MARGIN_ALL_FIELDS),
+                "data": [list(_MARGIN_ALL_ROW)],
+            },
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestParseTwseMarginAllPayload:
+    def test_basic_returns_df_and_date(self):
+        df, data_date = _parse_twse_margin_all_payload(_make_margin_all_payload())
+        assert data_date == dt.date(2026, 7, 2)
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert row["股票代號"] == "2464"
+        assert row["融資買進"] == "1,183"
+        assert row["融資今日餘額"] == "10,371"
+        assert row["融券買進"] == "59"
+        assert row["融券今日餘額"] == "0"
+
+    def test_prepare_twse_margin_integration(self):
+        """新 fetch 輸出必須不改 prepare_twse_margin 就能解析出標準欄位。"""
+        df, _ = _parse_twse_margin_all_payload(_make_margin_all_payload())
+        prepared = prepare_twse_margin(df)
+        row = prepared.iloc[0]
+        assert row["symbol"] == "2464"
+        assert row["margin_buy"] == 1183
+        assert row["margin_sell"] == 3412
+        assert row["margin_balance"] == 10371
+        # margin_change = 買進 - 賣出 - 現金償還 = 1183 - 3412 - 177
+        assert row["margin_change"] == -2406
+        assert row["short_balance"] == 0
+        # short_change = 券賣 - 券買 - 現券償還 = 0 - 59 - 0
+        assert row["short_change"] == -59
+
+    def test_stat_not_ok_raises_data_unavailable(self):
+        """尚未發布/休市 → DataUnavailableError（retry decorator 不重試、立即拋）。"""
+        payload = _make_margin_all_payload(stat="很抱歉，沒有符合條件的資料!")
+        with pytest.raises(DataUnavailableError):
+            _parse_twse_margin_all_payload(payload)
+
+    def test_missing_summary_table_raises_value_error(self):
+        payload = _make_margin_all_payload()
+        payload["tables"] = [payload["tables"][0]]  # 只剩信用交易統計表
+        with pytest.raises(ValueError):
+            _parse_twse_margin_all_payload(payload)
+
+    def test_fields_mismatch_raises_value_error(self):
+        """欄位位移/改版 → 拒收（寧缺勿錯），不可默默用錯位置的值。"""
+        payload = _make_margin_all_payload()
+        shifted = list(_MARGIN_ALL_FIELDS)
+        shifted.insert(2, "新欄位")
+        payload["tables"][1]["fields"] = shifted
+        with pytest.raises(ValueError):
+            _parse_twse_margin_all_payload(payload)
+
+    def test_empty_rows_raises_value_error(self):
+        payload = _make_margin_all_payload()
+        payload["tables"][1]["data"] = []
+        with pytest.raises(ValueError):
+            _parse_twse_margin_all_payload(payload)
+
+    def test_row_width_mismatch_raises_value_error(self):
+        payload = _make_margin_all_payload()
+        payload["tables"][1]["data"] = [_MARGIN_ALL_ROW[:10]]
+        with pytest.raises((ValueError, DataUnavailableError)):
+            _parse_twse_margin_all_payload(payload)
+
+
+class _FakeMarginResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeMarginSession:
+    def __init__(self, payload: dict):
+        self._payload = payload
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, url, params=None, timeout=None, verify=None):
+        self.calls.append((url, params or {}))
+        return _FakeMarginResponse(self._payload)
+
+
+class TestFetchTwseMargin:
+    def test_requests_dated_endpoint_and_returns_payload_date(self):
+        session = _FakeMarginSession(_make_margin_all_payload())
+        df, data_date = fetch_twse_margin(session, dt.date(2026, 7, 2))
+        assert data_date == dt.date(2026, 7, 2)
+        assert len(df) == 1
+        url, params = session.calls[0]
+        assert url.endswith("/exchangeReport/MI_MARGN")
+        assert params["date"] == "20260702"
+        assert params["selectType"] == "ALL"
+        assert params["response"] == "json"
+
+    def test_date_mismatch_is_returned_for_caller_to_reject(self):
+        """payload date != 請求 date 時原樣回傳，由呼叫端比對後拒用。"""
+        session = _FakeMarginSession(_make_margin_all_payload(date="20260701"))
+        _, data_date = fetch_twse_margin(session, dt.date(2026, 7, 2))
+        assert data_date == dt.date(2026, 7, 1)
+        assert data_date != dt.date(2026, 7, 2)

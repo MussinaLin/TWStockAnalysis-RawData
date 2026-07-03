@@ -39,7 +39,6 @@ TWSE_TAIEX_OHLC_URL = "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST"
 TWSE_MARKET_VOLUME_URL = "https://www.twse.com.tw/exchangeReport/FMTQIK"
 TWSE_FOREIGN_NET_URL = "https://www.twse.com.tw/fund/BFI82U"
 TWSE_MARKET_MARGIN_URL = "https://www.twse.com.tw/exchangeReport/MI_MARGN"
-TWSE_MARGIN_URL = "https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN"
 TPEX_MARGIN_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
 TPEX_MARGIN_V2_URL = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
 MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
@@ -721,30 +720,88 @@ def _parse_roc_date_compact(value: str) -> dt.date | None:
         return None
 
 
+# Dated MI_MARGN (selectType=ALL) 個股融資融券表結構。
+# fields 有重複欄名（融資/融券各一組 買進/賣出/前日餘額/今日餘額），必須靠位置對映；
+# 結構不符即拒收（寧缺勿錯，缺值交給 D+1 MoneyDJ 修正機制補）。
+_TWSE_MARGIN_ALL_FIELDS = [
+    "代號", "名稱",
+    "買進", "賣出", "現金償還", "前日餘額", "今日餘額", "次一營業日限額",
+    "買進", "賣出", "現券償還", "前日餘額", "今日餘額", "次一營業日限額",
+    "資券互抵", "註記",
+]
+# 重組為 OpenAPI 相容的無歧義中文欄名，讓 prepare_twse_margin() 無需改動。
+_TWSE_MARGIN_ALL_COLUMNS = [
+    "股票代號", "股票名稱",
+    "融資買進", "融資賣出", "融資現金償還", "融資前日餘額", "融資今日餘額", "融資限額",
+    "融券買進", "融券賣出", "融券現券償還", "融券前日餘額", "融券今日餘額", "融券限額",
+    "資券互抵", "註記",
+]
+
+
+def _parse_twse_margin_all_payload(
+    payload: dict,
+) -> tuple[pd.DataFrame, dt.date | None]:
+    """Parse dated MI_MARGN (selectType=ALL) payload into per-stock margin data.
+
+    Returns (DataFrame with OpenAPI-compatible Chinese column names, data date).
+
+    Raises:
+        DataUnavailableError: stat != OK（尚未發布/休市）— 合法無資料，
+            _retry_on_transient 不重試、立即往上拋。
+        ValueError: 表結構/欄位不符（偶發壞 payload 或 TWSE 改版）— 交給
+            _retry_on_transient 重試，用盡後轉 DataUnavailableError。
+    """
+    if payload.get("stat") != "OK":
+        raise DataUnavailableError(payload.get("stat") or "TWSE MI_MARGN 回傳異常")
+
+    table = None
+    for t in payload.get("tables", []):
+        if "融資融券彙總" in str(t.get("title", "")):
+            table = t
+            break
+    if table is None:
+        raise ValueError("TWSE MI_MARGN 缺少融資融券彙總表")
+
+    fields = [str(f).strip() for f in table.get("fields", [])]
+    if fields != _TWSE_MARGIN_ALL_FIELDS:
+        raise ValueError(f"TWSE MI_MARGN 欄位結構不符：{fields}")
+
+    rows = table.get("data") or []
+    if not rows:
+        raise ValueError("TWSE MI_MARGN 融資融券彙總表無資料")
+
+    # 欄數與 columns 不符時 pandas 會拋 ValueError → 交給 retry decorator 處理
+    df = pd.DataFrame(rows, columns=_TWSE_MARGIN_ALL_COLUMNS)
+    data_date = _parse_date_any(str(payload.get("date", "")))
+    return df, data_date
+
+
 @_retry_on_transient
-def fetch_twse_margin(session: requests.Session) -> tuple[pd.DataFrame, dt.date | None]:
-    """Fetch TWSE margin trading data for all listed stocks (today only).
+def fetch_twse_margin(
+    session: requests.Session, date: dt.date
+) -> tuple[pd.DataFrame, dt.date | None]:
+    """Fetch TWSE per-stock margin trading data for a single date.
+
+    使用盤後報表 MI_MARGN（帶 date 參數、selectType=ALL）。payload 含 stat 與 date，
+    呼叫端可驗證資料確實屬於 ``date``。
+    （舊版走 OpenAPI 鏡像：不含日期且晚一天更新，21:41 daily 跑時拿到的其實是
+    D-1 的資料集、被誤標成 D 寫入 → cond_margin_surge 在 daily 永遠無法觸發。）
 
     Returns DataFrame and data date. The DataFrame has Chinese column names.
     Key columns: 股票代號, 融資買進, 融資賣出, 融資現金償還, 融資今日餘額,
                  融券賣出, 融券買進, 融券現券償還, 融券今日餘額
-
-    Note: TWSE OpenAPI does not return date in record, returns None for date.
-    Caller should assume data is for today when date is None.
     """
+    params = {
+        "response": "json",
+        "date": date.strftime("%Y%m%d"),
+        "selectType": "ALL",
+    }
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TWSE_MARGIN_URL, timeout=30, verify=False)
+    response = session.get(
+        TWSE_MARKET_MARGIN_URL, params=params, timeout=30, verify=False
+    )
     response.raise_for_status()
-    payload = response.json()
-
-    if not isinstance(payload, list):
-        raise DataUnavailableError("TWSE MI_MARGN 回傳格式異常")
-    if not payload:
-        raise DataUnavailableError("TWSE MI_MARGN 無資料")
-
-    # TWSE OpenAPI doesn't include date in records, return None
-    # Caller should assume it's today's data
-    return pd.DataFrame(payload), None
+    return _parse_twse_margin_all_payload(response.json())
 
 
 @_retry_on_transient

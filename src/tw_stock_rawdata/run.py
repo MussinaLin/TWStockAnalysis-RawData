@@ -896,11 +896,12 @@ def _run_for_date(
         # margin_cache will be used directly in _build_daily_rows
         pass
     elif date == today:
-        # Use OpenAPI for today's data (all stocks at once)
+        # Use dated MI_MARGN report for today's data (all stocks at once)
         try:
-            twse_margin_raw, twse_margin_date = fetch_twse_margin(session)
-            # TWSE OpenAPI doesn't return date, assume today when None
-            if twse_margin_date is None or twse_margin_date == date:
+            twse_margin_raw, twse_margin_date = fetch_twse_margin(session, date)
+            # 嚴格驗證資料日期 == 當日；不符（TWSE 尚未發布或回舊資料）就不寫，
+            # 缺值由 D+1 的 MoneyDJ 修正機制補，避免 D-1 值被誤標成 D。
+            if twse_margin_date == date:
                 twse_margin = prepare_twse_margin(twse_margin_raw)
             else:
                 print(f"{sheet_name} TWSE 融資融券日期不匹配：{twse_margin_date} != {date}")
@@ -1280,8 +1281,8 @@ def _run_for_date_no_write(
         pass
     elif date == today:
         try:
-            twse_margin_raw, twse_margin_date = fetch_twse_margin(session)
-            if twse_margin_date is None or twse_margin_date == date:
+            twse_margin_raw, twse_margin_date = fetch_twse_margin(session, date)
+            if twse_margin_date == date:
                 twse_margin = prepare_twse_margin(twse_margin_raw)
         except (DataUnavailableError, requests.RequestException):
             pass

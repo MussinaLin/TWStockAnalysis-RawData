@@ -39,7 +39,7 @@ def _count_get_raising(monkeypatch) -> dict:
 def test_fetch_twse_margin_retries_long_window(monkeypatch):
     calls = _count_get_raising(monkeypatch)
     with pytest.raises(requests.ConnectionError):
-        sources.fetch_twse_margin(requests.Session())
+        sources.fetch_twse_margin(requests.Session(), dt.date(2026, 6, 2))
     assert calls["n"] == RETRY_ATTEMPTS
 
 
