@@ -69,6 +69,17 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 
 > 大戶持股佔比 = 持股 400 張（> 400,000 股）以上占集保庫存數比例，存於 `stock_major_holder.holding_ratio`（小數，如 0.7572）。
 
+### 休市開關（config.is_trading_day）
+
+「純 daily 模式」（不帶任何參數）啟動時，會先讀共用 `config` 表（由下游
+TWStockAnalysis repo 擁有，本 repo 只讀不寫）中 `key = 'is_trading_day'` 的值：
+
+- `false` / `0` / `no`（不分大小寫）→ 印出休市訊息後直接結束（exit 0），不做任何抓取。
+- `true` / `1` / `yes` → 照常執行。
+- 讀不到（表或 key 不存在、值無法辨識、DB 錯誤）→ **fail-open**：印警告後照常執行。
+
+手動操作（`--date`、`--backfill-*`、`--update-shares`、`--dahu`）**不受**此開關影響，隨時可跑。
+
 ## Docker
 
 PG infra 由下游 TWStockAnalysis repo 擁有：

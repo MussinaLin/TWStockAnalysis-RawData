@@ -7,6 +7,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import psycopg
 import requests
 from dotenv import load_dotenv
 
@@ -15,6 +16,7 @@ from .db import close_pool, get_pool, init_schema
 from .db_utils import (
     correct_prev_margin_balance,
     find_consensus_prev_trade_date,
+    get_config_value,
     get_enabled_stocks,
     load_stock_names,
     load_stock_shares,
@@ -298,6 +300,42 @@ def _dahu_command(
         print(
             f"  {date.isoformat()} 大戶持股佔比已寫入 {n_written} 筆，失敗 {n_failed} 筆"
         )
+
+
+def _is_daily_mode(args: argparse.Namespace) -> bool:
+    """是否為「純 daily 模式」（無任何模式參數，抓今天）。
+
+    只有此模式檢查 config.is_trading_day 休市開關；手動操作
+    （--date / --backfill-* / --update-shares / --dahu）不受開關影響，隨時可跑。
+    """
+    return not (
+        args.date
+        or args.backfill_start
+        or args.backfill_end
+        or args.backfill_stocks
+        or args.update_shares
+        or args.dahu
+    )
+
+
+def _parse_trading_day(value: str | None) -> bool:
+    """解析 config.is_trading_day 的值。
+
+    fail-open：讀不到（None）或無法辨識的值一律視為 True 照常執行，
+    開關只是輔助，缺了不能影響原本抓資料流程。
+    """
+    if value is None:
+        print("警告：config 表查無 is_trading_day，視為交易日照常執行")
+        return True
+
+    normalized = value.strip().lower()
+    if normalized in ("false", "0", "no"):
+        return False
+    if normalized in ("true", "1", "yes"):
+        return True
+
+    print(f"警告：config.is_trading_day 值無法辨識（{value!r}），視為交易日照常執行")
+    return True
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1368,6 +1406,17 @@ def _main_inner(
 ) -> None:
     """Inner main logic for RawData."""
     db_url = config.database_url
+
+    # 休市開關：只擋純 daily 模式（排程用）；讀不到一律 fail-open 照常執行
+    if _is_daily_mode(args):
+        try:
+            value = get_config_value(db_url, "is_trading_day")
+        except psycopg.Error as exc:
+            print(f"警告：讀取 config.is_trading_day 失敗（{exc}），視為交易日照常執行")
+        else:
+            if not _parse_trading_day(value):
+                print("config.is_trading_day = false，今日休市，結束執行")
+                return
 
     # build_session 對 www.twse.com.tw 加最小請求間隔，避免限流回空殼被誤判成沒資料。
     session = build_session()

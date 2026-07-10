@@ -119,6 +119,19 @@ def upsert_stock_shares(
         conn.commit()
 
 
+def get_config_value(database_url: str, key: str) -> str | None:
+    """讀取 config 表（下游 TWStockAnalysis repo 擁有）中指定 key 的 value。
+
+    查無該 key 時回傳 None。表不存在等 DB 錯誤由呼叫端處理。
+    """
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM config WHERE key = %s", (key,)
+        ).fetchone()
+    return row[0] if row else None
+
+
 def load_stock_names(database_url: str) -> dict[str, str]:
     """Load stock name mapping from stocks table."""
     pool = get_pool(database_url)
