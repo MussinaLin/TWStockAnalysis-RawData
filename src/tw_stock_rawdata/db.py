@@ -123,20 +123,24 @@ CREATE TABLE IF NOT EXISTS market_daily (
     updated_time          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- stock_major_holder (大戶持股佔比)
+-- stock_holder_percent (大戶 / 散戶持股佔比)
 -- 資料來源：TDCC 集保戶股權分散表，每週更新一次（trade_date 為週五結算日）。
--- holding_ratio：400 張（> 400,000 股）以上占集保庫存數比例，如 0.7572。
-CREATE TABLE IF NOT EXISTS stock_major_holder (
+-- major_ratio：400 張（> 400,000 股）以上占集保庫存數比例，如 0.7572。
+-- retail_ratio：小於 20 張（<= 20,000 股）占集保庫存數比例，如 0.1520。
+CREATE TABLE IF NOT EXISTS stock_holder_percent (
     symbol        VARCHAR(10) NOT NULL,
     trade_date    DATE        NOT NULL,
     name          VARCHAR(50),
-    holding_ratio NUMERIC(8,6),
+    major_ratio   NUMERIC(8,6),
+    retail_ratio  NUMERIC(8,6),
     created_time  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_time  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (symbol, trade_date)
 );
-CREATE INDEX IF NOT EXISTS idx_major_holder_trade_date
-    ON stock_major_holder (trade_date);
+-- 既有資料庫的線上 migration：補上後加的 retail_ratio 欄（idempotent）。
+ALTER TABLE stock_holder_percent ADD COLUMN IF NOT EXISTS retail_ratio NUMERIC(8,6);
+CREATE INDEX IF NOT EXISTS idx_holder_percent_trade_date
+    ON stock_holder_percent (trade_date);
 
 -- Triggers for updated_time
 DO $$
@@ -160,9 +164,9 @@ BEGIN
             FOR EACH ROW EXECUTE FUNCTION update_updated_time();
     END IF;
     IF NOT EXISTS (
-        SELECT 1 FROM pg_trigger WHERE tgname = 'trg_major_holder_updated'
+        SELECT 1 FROM pg_trigger WHERE tgname = 'trg_holder_percent_updated'
     ) THEN
-        CREATE TRIGGER trg_major_holder_updated BEFORE UPDATE ON stock_major_holder
+        CREATE TRIGGER trg_holder_percent_updated BEFORE UPDATE ON stock_holder_percent
             FOR EACH ROW EXECUTE FUNCTION update_updated_time();
     END IF;
 END $$;
