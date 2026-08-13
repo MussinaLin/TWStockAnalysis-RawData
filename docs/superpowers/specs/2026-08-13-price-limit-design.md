@@ -48,6 +48,10 @@
   - TPEX v2 `dailyQuotes`：`漲跌`，格式 `+0.46`
 - `MI_INDEX` 的 `漲跌(+/-)` 去除 HTML 標籤後只有四種值：
   `+`(773) / `-`(464) / 空字串(130，皆為價差 0.00) / `X`(12，除權息日)
+- **`STOCK_DAY_ALL` 在除權息日的 `Change` 給 `0.0000`，不帶任何標記**（2026-08-12
+  實測：MI_INDEX 標 `X` 的 12 檔，在 STOCK_DAY_ALL 全部是 `0.0000`）。
+  其餘三個來源都能正確表達「無漲跌價差」：`MI_INDEX` 的 `X`、`STOCK_DAY` 的 `X0.00`、
+  TPEX 的中文字串 `除息` / `除權息`（2026-08-05 ~ 08-12 實測 21 筆案例皆為此格式）。
 - **`STOCK_DAY_ALL` 無視 `date` 參數**，永遠回傳最後交易日，故不可用於歷史回補。
 - `MI_INDEX?date=` 與 TPEX v2 `dailyQuotes?date=` 皆可取歷史日資料。
 - 現有 `_clean_number('X0.00')` 已回傳 `None`（`float()` 拋 `ValueError`），
@@ -96,18 +100,33 @@ def calc_limits(ref: Decimal | None) -> tuple[Decimal | None, Decimal | None]
 3. **`run.py`**
    - `_fetch_ohlcv_with_fallback` 的回傳值由 5-tuple 改為 `NamedTuple`
      （欄位 `open` / `close` / `high` / `low` / `volume` / `change`），只有一個 caller。
+   - `change` 依上述獨立優先序取得，**跳過 `STOCK_DAY_ALL` 區塊**；OHLCV 其餘欄位
+     的逐欄補洞行為完全不動。
    - `_build_daily_rows`：算出參考價後呼叫 `calc_limits`，兩欄寫入 row dict。
      **轉換用 `Decimal(str(x))` 不可用 `Decimal(x)`** —— 上游 `_clean_number` 回的是 `float`，
      `Decimal(2415.0)` 會把浮點誤差整包帶進來，`Decimal(str(2415.0))` 才是乾淨的 `2415.0`。
 4. **`db_utils.py`**：`_RAW_COLUMNS` 與 `_RAW_DF_COLS` 各加 `limit_up` / `limit_down`。
    `upsert_daily_raw` 的 COALESCE 語意不動。
 
-## 不變量：change 與 close 必須同來源
+## 不變量：change 不可取自 STOCK_DAY_ALL
 
-`_fetch_ohlcv_with_fallback` 現行語意是**逐欄補洞**（`open` 缺了就往下一個來源撈 `open`）。
-`change` **不適用**這個語意：`參考價 = close − change` 若混搭不同來源會算出垃圾。
+`change` **不跟隨 OHLCV 的 fallback 順序**，而有自己的來源優先序：
 
-規則：**`change` 只在「該來源提供了 `close`」時與 `close` 一起取，不獨立補洞。**
+```
+MI_INDEX → STOCK_DAY（逐檔月表）→ TPEX quotes
+```
+
+**`STOCK_DAY_ALL` 永不供應 `change`。** 它在除權息日給 `Change = 0.0000` 且不帶任何標記，
+而它是 OHLCV fallback 鏈的第一順位；若讓它供應 change，除權息日會算出
+`參考價 = 收盤`、`漲停價 = 收盤 × 1.1` 這種看起來合理但錯誤的值，
+正好繞過「推不出參考價就寫 NULL」的設計。
+
+跨來源取值在此是安全的：`_run_for_date` 已對每個來源驗證 `*_date == date`，
+所有來源都指向同一交易日；且上市股不會出現在 TPEX quotes、上櫃股不會出現在 MI_INDEX，
+優先序天然依市場別分流。`MI_INDEX` 在 `_run_for_date` 中是**無條件抓取**
+（非等 OHLCV fallback 觸發才抓），故上市股必定取得到。
+
+三個來源都取不到時 `change` 為 `None`，漲跌停寫 NULL —— 符合「不猜」的設計。
 
 此條需寫入 `CLAUDE.md` 的 Gotchas 章節。
 
@@ -166,8 +185,11 @@ tw-stock-rawdata --backfill-limits --backfill-start 2025-01-01 --backfill-end 20
   空字串 + `0.00` → `0.0`
 
 `test_run.py`
-- **同源不變量**：mock 兩個來源，讓 `close` 只出現在來源 A、`change` 只出現在來源 B，
-  驗證回傳的 `change` 為 `None`，而非從 B 撈來的值。
+- **STOCK_DAY_ALL 不供應 change**：mock 一個 `twse_day_all` 含 `change` 欄且
+  `twse_mi_index` 為 `None`，驗證回傳的 `change` 為 `None`（而非 day_all 的值），
+  同時 `close` 仍正常取自 day_all。
+- **MI_INDEX 供應 change**：`close` 取自 `twse_day_all`、`change` 取自 `twse_mi_index`，
+  驗證兩者可跨來源組合。
 
 ## 文件
 
