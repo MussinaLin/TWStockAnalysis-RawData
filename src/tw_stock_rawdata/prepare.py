@@ -98,6 +98,11 @@ def _merge_change_sign(sign_text, magnitude) -> float | None:
     sign = re.sub(r"<[^>]*>", "", str(sign_text or "")).strip()
     if sign.upper() == "X":
         return None
+    if sign == "" and value != 0:
+        # 空號只可能對應 0.00（spec 實測 130 筆皆然）。非 0 卻無號，代表正負號欄
+        # 找不到或格式跑掉（欄位改名/消失時 sign_text 會是 None）——這種情況正負號
+        # 未知，不可默認當正值，寧可回 None 讓上游把 change 寫成 NULL。
+        return None
     return -value if sign == "-" else value
 
 

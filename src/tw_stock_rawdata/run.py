@@ -489,6 +489,14 @@ def _backfill_limits_command(
     args: argparse.Namespace,
 ) -> None:
     """--backfill-limits：只回補 stock_daily_raw 的 limit_up / limit_down。"""
+    if args.backfill_stocks or args.date:
+        ignored = [
+            name
+            for name, val in [("--backfill-stocks", args.backfill_stocks), ("--date", args.date)]
+            if val
+        ]
+        print(f"警告：--backfill-limits 已啟用，{'、'.join(ignored)} 將被忽略")
+
     if not args.backfill_start or not args.backfill_end:
         print("錯誤：--backfill-limits 需搭配 --backfill-start 和 --backfill-end")
         return
@@ -775,6 +783,12 @@ def _fetch_ohlcv_with_fallback(
         row = twse_mi_index.loc[twse_mi_index["symbol"] == symbol]
         if not row.empty:
             change = row.iloc[0].get("change")
+    # 注意：用 `is None`、不是 `pd.isna`。MI_INDEX 除權息日回的 change 是 NaN
+    # 不是 None，所以上一個 block 賦值後，這裡的 `change is None` 不會為 True，
+    # 不會誤把上市股（不在 TPEX）的 NaN 又拿 TPEX 的資料覆蓋一次 —— 只是這個
+    # 「不會誤觸發」目前是靠「上市股不在 TPEX quotes 裡」這個外部事實撐住，
+    # 不是程式碼本身保證的。日後若再加第三個 change 來源（尤其若它的「找不到」
+    # 用 None 表示），這裡要重新檢視，否則可能把已取到的 NaN 又蓋一次。
     if change is None and not tpex_quotes.empty:
         row = tpex_quotes.loc[tpex_quotes["symbol"] == symbol]
         if not row.empty:

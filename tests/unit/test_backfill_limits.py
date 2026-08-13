@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from contextlib import contextmanager
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -163,6 +164,49 @@ class TestCollectLimitUpdates:
         monkeypatch.setattr(run, "prepare_tpex_quotes", lambda df: df)
 
         assert run._collect_limit_updates(None, DATE) == []
+
+
+class TestBackfillLimitsDispatchWarning:
+    """finding E：--backfill-limits 先中 dispatch，同傳 --backfill-stocks / --date
+
+    會被靜默忽略；改成印警告。用純週末區間讓 dates 迴圈整段被 skip，
+    不必 mock 資料來源或 DB。
+    """
+
+    def _args(self, **overrides):
+        import argparse
+
+        base = dict(
+            date=None, backfill_start="2026-08-15", backfill_end="2026-08-16",
+            backfill_stocks=None, backfill_limits=True,
+        )
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_warns_when_backfill_stocks_also_set(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        args = self._args(backfill_stocks="2330,2317")
+        run._backfill_limits_command(None, SimpleNamespace(database_url="x"), args)
+
+        out = capsys.readouterr().out
+        assert "警告" in out
+        assert "--backfill-stocks" in out
+
+    def test_warns_when_date_also_set(self, capsys: pytest.CaptureFixture[str]) -> None:
+        args = self._args(date="2026-08-12")
+        run._backfill_limits_command(None, SimpleNamespace(database_url="x"), args)
+
+        out = capsys.readouterr().out
+        assert "警告" in out
+        assert "--date" in out
+
+    def test_no_warning_when_used_alone(self, capsys: pytest.CaptureFixture[str]) -> None:
+        args = self._args()
+        run._backfill_limits_command(None, SimpleNamespace(database_url="x"), args)
+
+        out = capsys.readouterr().out
+        assert "警告" not in out
 
 
 def test_backfill_limits_is_not_daily_mode() -> None:

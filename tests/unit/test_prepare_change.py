@@ -32,6 +32,14 @@ class TestMergeChangeSign:
     def test_unparseable_magnitude_returns_none(self) -> None:
         assert _merge_change_sign("<p></p>", "--") is None
 
+    def test_missing_sign_with_nonzero_magnitude_returns_none(self) -> None:
+        """空號欄只可能對應 0.00；非 0 卻無號 = 正負號沒解析到，不可默認為正值。"""
+        assert _merge_change_sign("", "20.00") is None
+
+    def test_none_sign_with_nonzero_magnitude_returns_none(self) -> None:
+        """`change_sign` 欄整個缺席時 sign_text 會是 None，同樣不可默認為正值。"""
+        assert _merge_change_sign(None, "20.00") is None
+
 
 class TestPrepareMiIndexChange:
     def test_merges_sign_column(self) -> None:
@@ -56,6 +64,24 @@ class TestPrepareMiIndexChange:
         out = prepare_twse_mi_index(df)
         assert out.loc[out["symbol"] == "2330", "change"].iloc[0] == 20.0
         assert out.loc[out["symbol"] == "3605", "change"].isna().iloc[0]
+
+    def test_missing_sign_column_yields_none_not_positive(self) -> None:
+        """來源缺 `漲跌(+/-)` 欄（例如表頭改名/全形括號）時，change 必須是 None，
+
+        不可默默把非 0 的漲跌價差當成正值（見 finding A：這是唯一會讓下跌股
+        被靜默算成上漲的路徑）。
+        """
+        df = pd.DataFrame(
+            [{
+                "證券代號": "2330", "證券名稱": "台積電",
+                "開盤價": "2,405.00", "最高價": "2,415.00",
+                "最低價": "2,390.00", "收盤價": "2,415.00",
+                "漲跌價差": "20.00",
+                "成交股數": "19,448,153",
+            }]
+        )
+        out = prepare_twse_mi_index(df)
+        assert out["change"].isna().iloc[0]
 
     def test_sign_column_is_dropped(self) -> None:
         df = pd.DataFrame(
