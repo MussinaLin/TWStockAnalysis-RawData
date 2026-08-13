@@ -15,7 +15,8 @@
 - Python `>=3.13`；所有新檔案開頭加 `from __future__ import annotations`。
 - ruff `line-length = 100`。
 - 測試放 `tests/unit/`，執行 `pytest tests/unit/`。
-- 金額計算一律用 `Decimal`，禁止 `float` 算術。`float` → `Decimal` 一律走 `Decimal(str(x))`，不可 `Decimal(x)`。
+- **漲跌停換算一律用 `Decimal`**；來源解析層維持 `float`（沿用既有 `_clean_number`）。
+  唯一的 `float` → `Decimal` 轉換點是 `_reference_price`，且一律走 `Decimal(str(x))`，不可 `Decimal(x)`。
 - **`change`（漲跌價差）只能取自 `MI_INDEX` 與 TPEX quotes，永遠不可取自 `STOCK_DAY_ALL`**（它在除權息日給 `0.0000` 且無標記）。
 - 推不出參考價時 `limit_up` / `limit_down` 一律寫 `None`，不以前一交易日收盤價推測。
 - commit message 不加任何 `Co-Authored-By:` trailer。
@@ -190,20 +191,21 @@ git commit -m "feat: 新增 price_limit 模組計算台股漲跌停價"
 
 ---
 
-### Task 2: `prepare.py` — 三個行情來源吐出 `change` 欄
+### Task 2: `prepare.py` — MI_INDEX 與 TPEX quotes 吐出 `change` 欄
 
 **Files:**
-- Modify: `src/tw_stock_rawdata/prepare.py`（`prepare_tpex_quotes` / `prepare_twse_day_all` / `prepare_twse_mi_index`，新增 `_merge_change_sign`）
+- Modify: `src/tw_stock_rawdata/prepare.py`（`prepare_tpex_quotes` / `prepare_twse_mi_index`，新增 `_merge_change_sign`）
 - Test: `tests/unit/test_prepare_change.py`
 
 **Interfaces:**
 - Consumes: `sources._clean_number`（已存在；對 `'X0.00'` / `'除息'` / `'---'` 皆回 `None`）
 - Produces:
   - `prepare._merge_change_sign(sign_text, magnitude) -> float | None`
-  - 上述三個 `prepare_*` 函式的回傳 DataFrame 都多一個 `change` 欄
+  - `prepare_tpex_quotes` 與 `prepare_twse_mi_index` 的回傳 DataFrame 多一個 `change` 欄
+  - **`prepare_twse_day_all` 不動**：`STOCK_DAY_ALL` 依不變量永遠不供應 `change`，
+    在那裡加欄位是沒有 consumer 的死程式碼，且長在「不准用」的位置容易被誤用
 
-**背景（實作者必讀）：** 三個來源的漲跌價差格式不同 ——
-`STOCK_DAY_ALL` 的 `Change` 已帶正負號（`"20.0000"` / `"-5.0000"`）；
+**背景（實作者必讀）：** 兩個來源的漲跌價差格式不同 ——
 TPEX 的 `漲跌` 是 `"+0.46"`，除權息日直接放中文 `"除息"` / `"除權息"`；
 `MI_INDEX` 的 `漲跌價差` 是絕對值，正負號在獨立欄位 `漲跌(+/-)`，
 值為 HTML（`<p style= color:red>+</p>`），去標籤後只有 `+` / `-` / 空字串 / `X` 四種，
@@ -230,7 +232,6 @@ import pandas as pd
 from tw_stock_rawdata.prepare import (
     _merge_change_sign,
     prepare_tpex_quotes,
-    prepare_twse_day_all,
     prepare_twse_mi_index,
 )
 
@@ -310,18 +311,6 @@ class TestPrepareTpexQuotesChange:
         )
         assert prepare_tpex_quotes(df)["change"].isna().iloc[0]
 
-
-class TestPrepareDayAllChange:
-    def test_signed_change(self) -> None:
-        df = pd.DataFrame(
-            [{
-                "Code": "2330", "Name": "台積電", "TradeVolume": "19448153",
-                "OpeningPrice": "2405.00", "HighestPrice": "2415.00",
-                "LowestPrice": "2390.00", "ClosingPrice": "2415.00",
-                "Change": "20.0000",
-            }]
-        )
-        assert prepare_twse_day_all(df)["change"].iloc[0] == 20.0
 ```
 
 - [ ] **Step 2: 跑測試確認失敗**
@@ -365,13 +354,7 @@ def _merge_change_sign(sign_text, magnitude) -> float | None:
         temp["change"] = None
 ```
 
-`prepare_twse_day_all`：`_find_columns` 的 spec 加一行
-
-```python
-        "change": [["change"], ["漲跌價差"], ["漲跌"]],
-```
-
-並在 `return temp` 之前加上與 `prepare_tpex_quotes` 完全相同的那段 `change` 處理。
+**`prepare_twse_day_all` 完全不動。**
 
 `prepare_twse_mi_index`：`_find_columns` 的 spec 加兩行（`change` 只能用
 `漲跌價差` 當關鍵字，用 `漲跌` 會先命中 `漲跌(+/-)`）：
@@ -481,7 +464,11 @@ def _empty_tpex() -> pd.DataFrame:
 
 
 def test_change_is_never_taken_from_stock_day_all() -> None:
-    """day_all 有 change 欄但 MI_INDEX 缺席 → change 必須是 None，close 仍取自 day_all。"""
+    """day_all 有 change 欄但 MI_INDEX 缺席 → change 必須是 None，close 仍取自 day_all。
+
+    prepare_twse_day_all 目前刻意不吐 change 欄，這裡手建帶 change 的 frame，
+    是為了鎖住「即使上游哪天真的給了，這裡也必須忽略」的不變量。
+    """
     result = run._fetch_ohlcv_with_fallback(
         session=None, date=DATE, symbol="3605",
         twse_day_all=_day_all("3605", 120.0, 0.0),
