@@ -268,6 +268,9 @@ def update_prev_day_margin_batch(
                  / short_sell / short_buy / short_balance / short_change /
                  short_margin_ratio。MoneyDJ 為權威來源，None 直接覆寫 NULL。
 
+    以單一 UPDATE ... FROM (VALUES ...) 一次搞定整批，而非逐列 execute：後者是
+    一列一次網路往返（實測遠端 DB 96.7ms/次），單日 6763 筆要 11 分鐘。
+
     Returns:
         實際 UPDATE 成功的 row 數合計（不存在的 (symbol, trade_date) 不算）。
     """
@@ -293,6 +296,10 @@ def update_prev_day_margin_batch(
     return n_updated
 
 
+# 每列 4 個參數；PostgreSQL 單一語句參數上限 65535，取 1000 列留足餘裕
+_LIMIT_UPDATE_CHUNK = 1000
+
+
 def update_price_limits_batch(
     database_url: str,
     updates: list[tuple[str, dt.date, Decimal, Decimal]],
@@ -312,20 +319,40 @@ def update_price_limits_batch(
     if not updates:
         return 0
 
-    sql = (
-        "UPDATE stock_daily_raw SET limit_up = %s, limit_down = %s"
-        " WHERE symbol = %s AND trade_date = %s"
-    )
-
     n_updated = 0
     pool = get_pool(database_url)
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            for symbol, trade_date, limit_up, limit_down in updates:
-                cur.execute(sql, [limit_up, limit_down, symbol, trade_date])
+            for start in range(0, len(updates), _LIMIT_UPDATE_CHUNK):
+                chunk = updates[start:start + _LIMIT_UPDATE_CHUNK]
+                values = ", ".join(
+                    ["(%s::varchar, %s::date, %s::numeric, %s::numeric)"] * len(chunk)
+                )
+                sql = (
+                    "UPDATE stock_daily_raw AS t"
+                    " SET limit_up = v.limit_up, limit_down = v.limit_down"
+                    f" FROM (VALUES {values})"
+                    " AS v(symbol, trade_date, limit_up, limit_down)"
+                    " WHERE t.symbol = v.symbol AND t.trade_date = v.trade_date"
+                )
+                cur.execute(sql, [x for row in chunk for x in row])
                 n_updated += cur.rowcount
         conn.commit()
     return n_updated
+
+
+def load_symbols_for_date(database_url: str, trade_date: dt.date) -> set[str]:
+    """回傳該交易日在 stock_daily_raw 已存在的 symbol 集合。
+
+    給 --backfill-limits 先過濾用：交易所公布的是全市場標的（含權證等，單日約
+    6700 筆），本 repo 只存 enabled 個股的兩百多列，其餘送上去只會命中 0 列。
+    """
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM stock_daily_raw WHERE trade_date = %s", (trade_date,)
+        ).fetchall()
+    return {r[0] for r in rows}
 
 
 # ---------------------------------------------------------------------------

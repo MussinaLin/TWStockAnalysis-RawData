@@ -72,11 +72,50 @@ class TestUpdatePriceLimitsBatch:
         sql, params = cursor.executed[0]
         assert sql.startswith("UPDATE stock_daily_raw")
         assert "INSERT" not in sql
-        assert params == [Decimal("2655"), Decimal("2175"), "2330", DATE]
+        assert params == ["2330", DATE, Decimal("2655"), Decimal("2175")]
+
+    def test_single_statement_regardless_of_row_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N 筆更新只能發一次 execute。
+
+        逐列 execute 是一列一次網路往返：實測對遠端 DB 是 96.7ms/次，
+        單日 6763 筆要 11 分鐘、回補一年 44.5 小時，等於這個指令沒得用。
+        """
+        cursor = _FakeCursor([500])
+        conn = _FakeConn(cursor)
+        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+
+        updates = [
+            (f"{i:04d}", DATE, Decimal("11"), Decimal("9")) for i in range(500)
+        ]
+        db_utils.update_price_limits_batch("postgres://x", updates)
+
+        assert len(cursor.executed) == 1
+        sql, params = cursor.executed[0]
+        assert len(params) == 500 * 4
+
+    def test_chunks_to_stay_under_param_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """超過 chunk 大小要分批：PostgreSQL 單一語句參數上限 65535。"""
+        cursor = _FakeCursor([1000, 500])
+        conn = _FakeConn(cursor)
+        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+
+        n_rows = db_utils._LIMIT_UPDATE_CHUNK + 500
+        updates = [
+            (f"{i:05d}", DATE, Decimal("11"), Decimal("9")) for i in range(n_rows)
+        ]
+        db_utils.update_price_limits_batch("postgres://x", updates)
+
+        assert len(cursor.executed) == 2
+        assert len(cursor.executed[0][1]) == db_utils._LIMIT_UPDATE_CHUNK * 4
+        assert len(cursor.executed[1][1]) == 500 * 4
 
     def test_returns_total_rowcount(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """不存在的 (symbol, trade_date) 不計入。"""
-        cursor = _FakeCursor([1, 0, 1])
+        """不存在的 (symbol, trade_date) 不計入 —— 由 UPDATE 的 rowcount 反映。"""
+        cursor = _FakeCursor([2])
         conn = _FakeConn(cursor)
         monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
 
@@ -218,3 +257,111 @@ def test_backfill_limits_is_not_daily_mode() -> None:
         backfill_stocks=None, backfill_limits=True, update_shares=False, dahu=False,
     )
     assert run._is_daily_mode(args) is False
+
+
+class _FakeResult:
+    def __init__(self, rows: list[Any]):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeQueryConn:
+    def __init__(self, rows: list[Any]):
+        self._rows = rows
+        self.executed: list[tuple[str, Any]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql: str, params: Any = None):
+        self.executed.append((sql, params))
+        return _FakeResult(self._rows)
+
+
+class _FakeQueryPool:
+    def __init__(self, conn: _FakeQueryConn):
+        self._conn = conn
+
+    @contextmanager
+    def connection(self):
+        yield self._conn
+
+
+class TestLoadSymbolsForDate:
+    def test_returns_symbol_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _FakeQueryConn([("2330",), ("3605",)])
+        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakeQueryPool(conn))
+
+        assert db_utils.load_symbols_for_date("postgres://x", DATE) == {"2330", "3605"}
+        sql, params = conn.executed[0]
+        assert "stock_daily_raw" in sql
+        assert params == (DATE,)
+
+    def test_empty_when_date_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = _FakeQueryConn([])
+        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakeQueryPool(conn))
+
+        assert db_utils.load_symbols_for_date("postgres://x", DATE) == set()
+
+
+class TestBackfillLimitsFiltering:
+    """交易所公布全市場約 6763 檔（含權證），本 repo 只存 enabled 的兩百多檔。
+
+    不先過濾就把 6763 筆全送上去，96.8% 命中 0 列，純粹浪費網路往返。
+    """
+
+    def _run(self, monkeypatch, existing, collected):
+        import argparse
+
+        sent: list[list] = []
+        monkeypatch.setattr(run, "load_symbols_for_date", lambda url, d: existing)
+        monkeypatch.setattr(run, "_collect_limit_updates", lambda s, d: collected)
+        monkeypatch.setattr(
+            run, "update_price_limits_batch",
+            lambda url, updates: (sent.append(updates), len(updates))[1],
+        )
+        args = argparse.Namespace(
+            backfill_start="2026-08-12", backfill_end="2026-08-12",
+            backfill_stocks=None, date=None,
+        )
+        cfg = SimpleNamespace(database_url="postgres://x")
+        run._backfill_limits_command(None, cfg, args)
+        return sent
+
+    def test_only_existing_symbols_are_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        collected = [
+            ("2330", DATE, Decimal("2655"), Decimal("2175")),
+            ("03041P", DATE, Decimal("11"), Decimal("9")),   # 權證，DB 沒有
+            ("3605", DATE, Decimal("132.0"), Decimal("108.0")),
+        ]
+        sent = self._run(monkeypatch, {"2330", "3605"}, collected)
+
+        assert len(sent) == 1
+        assert {u[0] for u in sent[0]} == {"2330", "3605"}
+
+    def test_date_with_no_rows_skips_api_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DB 該日沒有任何列時，連行情 API 都不該打。"""
+        import argparse
+
+        called = []
+        monkeypatch.setattr(run, "load_symbols_for_date", lambda url, d: set())
+        monkeypatch.setattr(
+            run, "_collect_limit_updates",
+            lambda s, d: called.append(d) or [],
+        )
+        args = argparse.Namespace(
+            backfill_start="2026-08-12", backfill_end="2026-08-12",
+            backfill_stocks=None, date=None,
+        )
+        run._backfill_limits_command(None, SimpleNamespace(database_url="postgres://x"), args)
+
+        assert called == []

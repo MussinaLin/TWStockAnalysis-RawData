@@ -22,6 +22,7 @@ from .db_utils import (
     get_enabled_stocks,
     load_stock_names,
     load_stock_shares,
+    load_symbols_for_date,
     update_prev_day_margin_batch,
     update_price_limits_batch,
     upsert_daily_raw,
@@ -510,7 +511,14 @@ def _backfill_limits_command(
     for date in dates:
         if date.weekday() >= 5:
             continue
-        updates = _collect_limit_updates(session, date)
+        # 先問 DB 該日有哪些 symbol。交易所公布的是全市場標的（含權證等，單日約
+        # 6700 筆），本 repo 只存 enabled 個股的兩百多列；不過濾就整批送上去，
+        # 96% 會命中 0 列，純粹浪費網路往返。DB 該日無列時連 API 都不用打。
+        existing = load_symbols_for_date(config.database_url, date)
+        if not existing:
+            print(f"{date.isoformat()} DB 無該日資料，略過")
+            continue
+        updates = [u for u in _collect_limit_updates(session, date) if u[0] in existing]
         if not updates:
             print(f"{date.isoformat()} 無可回補資料")
             continue
