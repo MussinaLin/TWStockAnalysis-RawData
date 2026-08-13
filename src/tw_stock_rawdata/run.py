@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from decimal import Decimal
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -43,6 +44,7 @@ from .prepare import (
     prepare_twse_margin,
     prepare_twse_mi_index,
 )
+from .price_limit import calc_limits
 from .sources import (
     DataUnavailableError,
     build_session,
@@ -484,6 +486,8 @@ def _build_daily_rows(
         low_price = ohlcv.low
         volume = ohlcv.volume
 
+        limit_up, limit_down = calc_limits(_reference_price(close_price, ohlcv.change))
+
         # 逐檔跳過 1：無價格（OHLC 來源對該檔失敗或當天無交易）
         if close_price is None and open_price is None:
             skipped += 1
@@ -565,6 +569,8 @@ def _build_daily_rows(
             "short_margin_ratio": short_margin_ratio,
             "foreign_holding_pct": holding_pct.get("foreign_holding_pct"),
             "insti_holding_pct": holding_pct.get("insti_holding_pct"),
+            "limit_up": limit_up,
+            "limit_down": limit_down,
         })
 
     if skipped:
@@ -588,6 +594,19 @@ class OhlcvResult(NamedTuple):
     low: float | None
     volume: int | None
     change: float | None
+
+
+def _reference_price(close, change) -> Decimal | None:
+    """由收盤價與漲跌價差推當日參考價；任一缺值即回 None，不以前日收盤推測。
+
+    pandas 會把含 None 的 float 欄位轉成 NaN，故 None 與 NaN 都要擋。
+    轉換一律走 Decimal(str(x))：Decimal(2415.0) 會把 float 誤差整包帶進來。
+    """
+    if close is None or change is None:
+        return None
+    if pd.isna(close) or pd.isna(change):
+        return None
+    return Decimal(str(close)) - Decimal(str(change))
 
 
 def _fetch_ohlcv_with_fallback(
