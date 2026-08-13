@@ -201,7 +201,7 @@ tw-stock-rawdata --backfill-limits --backfill-start 2025-01-01 --backfill-end 20
 - CLI 參數章節新增 `--backfill-limits` 用法與限制
 - 資料表章節 `stock_daily_raw` 補上 `limit_up` / `limit_down` 欄位與 NULL 語意
 
-`CLAUDE.md` 的 Gotchas 章節新增「change 與 close 必須同來源」。
+`CLAUDE.md` 的 Gotchas 章節新增「`change` 不可取自 `STOCK_DAY_ALL`」。
 
 ## 明確不做
 

@@ -89,7 +89,12 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 `dailyQuotes`（上櫃）兩個批量行情 API，不重打三大法人 / 融資融券 / 持股。
 它只 `UPDATE` 已存在的 row，不會新增 row；推不出參考價的個股整檔跳過，
 不會把既有值蓋成 `NULL`。結果冪等，可重複執行，不需 `--force`，
-也不支援 `--backfill-stocks`。
+也不支援 `--backfill-stocks`（同時傳入會被忽略，並印警告）。
+
+> 注意：重跑只能修正「修正後仍算得出數值」的錯值。若要把既有非 `NULL` 的值改回
+> `NULL`（例如日後排除新上市櫃前五日），因 upsert 採 `COALESCE`、回補對算出
+> `None` 的個股直接跳過，兩條寫入路徑都無法把已寫入的值清成 `NULL`，需手動
+> `UPDATE stock_daily_raw SET limit_up = NULL, limit_down = NULL WHERE ...`。
 
 ### 休市開關（config.is_trading_day）
 
