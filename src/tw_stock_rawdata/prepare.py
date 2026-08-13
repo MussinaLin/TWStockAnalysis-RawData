@@ -86,6 +86,21 @@ def _extract_standard_columns(
     return temp
 
 
+def _merge_change_sign(sign_text, magnitude) -> float | None:
+    """把 MI_INDEX 分離的正負號欄併回漲跌價差。
+
+    `漲跌(+/-)` 欄的值是 HTML，去標籤後只有 `+` / `-` / 空字串 / `X` 四種。
+    `X` 表該檔當日除權息，交易所未提供相對前一交易日的漲跌，推不出參考價 → 回 None。
+    """
+    value = _clean_number(magnitude)
+    if value is None:
+        return None
+    sign = re.sub(r"<[^>]*>", "", str(sign_text or "")).strip()
+    if sign.upper() == "X":
+        return None
+    return -value if sign == "-" else value
+
+
 def prepare_tpex_quotes(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare TPEX daily quotes into standard format."""
     cols = _find_columns(df, {
@@ -96,6 +111,7 @@ def prepare_tpex_quotes(df: pd.DataFrame) -> pd.DataFrame:
         "high": [["最高"], ["最高價"]],
         "low": [["最低"], ["最低價"]],
         "volume": [["成交股數"], ["成交量"]],
+        "change": [["漲跌"]],
     })
 
     temp = _extract_standard_columns(
@@ -123,6 +139,10 @@ def prepare_tpex_quotes(df: pd.DataFrame) -> pd.DataFrame:
         temp["volume"] = temp["volume"].map(_clean_int)
     else:
         temp["volume"] = None
+    if "change" in temp.columns:
+        temp["change"] = temp["change"].map(_clean_number)
+    else:
+        temp["change"] = None
 
     return temp
 
@@ -231,6 +251,8 @@ def prepare_twse_mi_index(df: pd.DataFrame) -> pd.DataFrame:
         "high": [["最高價"], ["最高"]],
         "low": [["最低價"], ["最低"]],
         "volume": [["成交股數"], ["成交量"]],
+        "change": [["漲跌價差"]],
+        "change_sign": [["漲跌(+/-)"]],
     })
 
     temp = _extract_standard_columns(
@@ -257,6 +279,17 @@ def prepare_twse_mi_index(df: pd.DataFrame) -> pd.DataFrame:
         temp["volume"] = temp["volume"].map(_clean_int)
     else:
         temp["volume"] = None
+    if "change" in temp.columns:
+        signs = (
+            temp["change_sign"] if "change_sign" in temp.columns else [None] * len(temp)
+        )
+        temp["change"] = [
+            _merge_change_sign(sign, value)
+            for sign, value in zip(signs, temp["change"])
+        ]
+    else:
+        temp["change"] = None
+    temp = temp.drop(columns=["change_sign"], errors="ignore")
 
     return temp
 
