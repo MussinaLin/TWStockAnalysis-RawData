@@ -1,0 +1,176 @@
+"""Unit tests for --backfill-limits 的資料收集與批次 UPDATE。"""
+
+from __future__ import annotations
+
+import datetime as dt
+from contextlib import contextmanager
+from decimal import Decimal
+from typing import Any
+
+import pandas as pd
+import pytest
+
+from tw_stock_rawdata import db_utils, run
+
+DATE = dt.date(2026, 8, 12)
+
+
+class _FakeCursor:
+    def __init__(self, rowcounts: list[int]):
+        self._rowcounts = list(rowcounts)
+        self.rowcount = 0
+        self.executed: list[tuple[str, Any]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.executed.append((sql, params))
+        if self._rowcounts:
+            self.rowcount = self._rowcounts.pop(0)
+
+
+class _FakeConn:
+    def __init__(self, cursor: _FakeCursor):
+        self._cursor = cursor
+        self.committed = False
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+class _FakePool:
+    def __init__(self, conn: _FakeConn):
+        self._conn = conn
+
+    @contextmanager
+    def connection(self):
+        yield self._conn
+
+
+class TestUpdatePriceLimitsBatch:
+    def test_empty_updates_returns_zero(self) -> None:
+        assert db_utils.update_price_limits_batch("postgres://x", []) == 0
+
+    def test_uses_update_not_insert(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """必須是 UPDATE：走 upsert 會 INSERT 出半套 row。"""
+        cursor = _FakeCursor([1])
+        conn = _FakeConn(cursor)
+        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+
+        db_utils.update_price_limits_batch(
+            "postgres://x", [("2330", DATE, Decimal("2655"), Decimal("2175"))]
+        )
+
+        sql, params = cursor.executed[0]
+        assert sql.startswith("UPDATE stock_daily_raw")
+        assert "INSERT" not in sql
+        assert params == [Decimal("2655"), Decimal("2175"), "2330", DATE]
+
+    def test_returns_total_rowcount(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """不存在的 (symbol, trade_date) 不計入。"""
+        cursor = _FakeCursor([1, 0, 1])
+        conn = _FakeConn(cursor)
+        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+
+        n = db_utils.update_price_limits_batch(
+            "postgres://x",
+            [
+                ("2330", DATE, Decimal("2655"), Decimal("2175")),
+                ("9999", DATE, Decimal("11"), Decimal("9")),
+                ("3605", DATE, Decimal("132.0"), Decimal("108.0")),
+            ],
+        )
+        assert n == 2
+        assert conn.committed is True
+
+
+class TestCollectLimitUpdates:
+    def _patch_sources(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mi_df: pd.DataFrame,
+        tpex_df: pd.DataFrame,
+    ) -> None:
+        monkeypatch.setattr(run, "fetch_twse_mi_index", lambda s, d: (mi_df, d))
+        monkeypatch.setattr(run, "fetch_tpex_daily_quotes_v2", lambda s, d: (tpex_df, d))
+        monkeypatch.setattr(run, "prepare_twse_mi_index", lambda df: df)
+        monkeypatch.setattr(run, "prepare_tpex_quotes", lambda df: df)
+
+    def test_computes_limits_from_both_markets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # close - change = 2415 → 對齊 test_price_limit.py 的 calc_limits(2415) 案例。
+        mi = pd.DataFrame([{"symbol": "2330", "close": 2435.0, "change": 20.0}])
+        tpex = pd.DataFrame([{"symbol": "6488", "close": 45.21, "change": 1.41}])
+        self._patch_sources(monkeypatch, mi, tpex)
+
+        updates = run._collect_limit_updates(None, DATE)
+
+        by_symbol = {u[0]: u for u in updates}
+        assert by_symbol["2330"][1] == DATE
+        assert by_symbol["2330"][2] == Decimal("2655")
+        assert by_symbol["2330"][3] == Decimal("2175")
+        assert "6488" in by_symbol
+
+    def test_skips_rows_without_reference_price(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """除權息日 change 為 NaN → 整檔跳過，不寫入也不覆蓋既有值。"""
+        mi = pd.DataFrame(
+            [
+                {"symbol": "2330", "close": 2415.0, "change": 20.0},
+                {"symbol": "3605", "close": 120.0, "change": float("nan")},
+            ]
+        )
+        empty = pd.DataFrame(columns=["symbol", "close", "change"])
+        self._patch_sources(monkeypatch, mi, empty)
+
+        symbols = {u[0] for u in run._collect_limit_updates(None, DATE)}
+        assert symbols == {"2330"}
+
+    def test_one_market_failing_does_not_lose_the_other(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tw_stock_rawdata.sources import DataUnavailableError
+
+        def _boom(session, date):
+            raise DataUnavailableError("TWSE 掛了")
+
+        tpex = pd.DataFrame([{"symbol": "6488", "close": 45.21, "change": 1.41}])
+        monkeypatch.setattr(run, "fetch_twse_mi_index", _boom)
+        monkeypatch.setattr(run, "fetch_tpex_daily_quotes_v2", lambda s, d: (tpex, d))
+        monkeypatch.setattr(run, "prepare_tpex_quotes", lambda df: df)
+
+        symbols = {u[0] for u in run._collect_limit_updates(None, DATE)}
+        assert symbols == {"6488"}
+
+    def test_date_mismatch_is_discarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """來源回傳的是別天的資料 → 不可寫進本日。"""
+        mi = pd.DataFrame([{"symbol": "2330", "close": 2415.0, "change": 20.0}])
+        empty = pd.DataFrame(columns=["symbol", "close", "change"])
+        monkeypatch.setattr(
+            run, "fetch_twse_mi_index", lambda s, d: (mi, dt.date(2026, 8, 11))
+        )
+        monkeypatch.setattr(run, "fetch_tpex_daily_quotes_v2", lambda s, d: (empty, d))
+        monkeypatch.setattr(run, "prepare_twse_mi_index", lambda df: df)
+        monkeypatch.setattr(run, "prepare_tpex_quotes", lambda df: df)
+
+        assert run._collect_limit_updates(None, DATE) == []
+
+
+def test_backfill_limits_is_not_daily_mode() -> None:
+    """--backfill-limits 是手動模式，不該被 config.is_trading_day 休市開關擋住。"""
+    import argparse
+
+    args = argparse.Namespace(
+        date=None, backfill_start="2025-01-01", backfill_end="2025-01-31",
+        backfill_stocks=None, backfill_limits=True, update_shares=False, dahu=False,
+    )
+    assert run._is_daily_mode(args) is False

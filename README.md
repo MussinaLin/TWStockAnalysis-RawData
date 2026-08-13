@@ -50,6 +50,9 @@ tw-stock-rawdata --backfill-start 2025-08-01 --backfill-end 2025-10-15
 # 回補指定股票
 tw-stock-rawdata --backfill-stocks 2330,2317 --backfill-start 2025-08-01 --backfill-end 2025-10-15
 
+# 只回補 limit_up / limit_down（不重打法人、融資融券、持股，比全量回補快很多）
+tw-stock-rawdata --backfill-limits --backfill-start 2025-01-01 --backfill-end 2026-08-12
+
 # 強制覆蓋既有資料
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force
 
@@ -81,6 +84,12 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 - **`NULL` 表該日推不出參考價**（除權息日交易所不提供漲跌價差，或該檔無成交），
   下游應跳過該檔該日的漲跌停判定，**不要**自行用前一交易日收盤價推算 —— 除權息日
   的正確基準是除權息參考價，用前日收盤會算出看不出來的錯值。
+
+歷史資料可用 `--backfill-limits` 回補：每個交易日只打 `MI_INDEX`（上市）與 TPEX
+`dailyQuotes`（上櫃）兩個批量行情 API，不重打三大法人 / 融資融券 / 持股。
+它只 `UPDATE` 已存在的 row，不會新增 row；推不出參考價的個股整檔跳過，
+不會把既有值蓋成 `NULL`。結果冪等，可重複執行，不需 `--force`，
+也不支援 `--backfill-stocks`。
 
 ### 休市開關（config.is_trading_day）
 

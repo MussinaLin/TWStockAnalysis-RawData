@@ -23,6 +23,7 @@ from .db_utils import (
     load_stock_names,
     load_stock_shares,
     update_prev_day_margin_batch,
+    update_price_limits_batch,
     upsert_daily_raw,
     upsert_holder_percent,
     upsert_market_daily,
@@ -319,6 +320,7 @@ def _is_daily_mode(args: argparse.Namespace) -> bool:
         or args.backfill_start
         or args.backfill_end
         or args.backfill_stocks
+        or args.backfill_limits
         or args.update_shares
         or args.dahu
     )
@@ -352,6 +354,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backfill-stocks", type=str, default=None,
         help="回補特定股票（逗號分隔）",
+    )
+    parser.add_argument(
+        "--backfill-limits", action="store_true",
+        help="只回補 limit_up / limit_down（需搭配 --backfill-start / --backfill-end）",
     )
     parser.add_argument(
         "--update-shares", action="store_true",
@@ -430,6 +436,81 @@ def _stock_sources_ok(
     upsert COALESCE（不以 NULL 覆寫舊值）處理，不在此 gating。
     """
     return tpex_insti_ok if is_tpex else twse_insti_ok
+
+
+def _collect_limit_updates(
+    session: requests.Session,
+    date: dt.date,
+) -> list[tuple[str, dt.date, Decimal, Decimal]]:
+    """抓單日兩市場行情，算出可寫入的 (symbol, date, limit_up, limit_down)。
+
+    只用 MI_INDEX（上市）與 TPEX v2 dailyQuotes（上櫃）—— STOCK_DAY_ALL 無視 date
+    參數永遠回最後交易日，不能用於回補。任一市場失敗只影響該市場，不中斷另一邊。
+    推不出參考價的個股整檔跳過，不寫入也不覆蓋既有值。
+    """
+    frames: list[pd.DataFrame] = []
+
+    try:
+        mi_raw, mi_date = fetch_twse_mi_index(session, date)
+        if mi_date == date:
+            frames.append(prepare_twse_mi_index(mi_raw))
+        else:
+            print(f"{date.isoformat()} TWSE MI_INDEX 日期不匹配：{mi_date} != {date}")
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"{date.isoformat()} TWSE MI_INDEX 取得失敗：{exc}")
+
+    try:
+        tpex_raw, tpex_date = fetch_tpex_daily_quotes_v2(session, date)
+        if tpex_date == date:
+            frames.append(prepare_tpex_quotes(tpex_raw))
+        else:
+            print(f"{date.isoformat()} TPEX 日行情日期不匹配：{tpex_date} != {date}")
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"{date.isoformat()} TPEX 日行情取得失敗：{exc}")
+
+    updates: list[tuple[str, dt.date, Decimal, Decimal]] = []
+    for frame in frames:
+        for _, row in frame.iterrows():
+            symbol = str(row.get("symbol", "")).strip()
+            if not symbol:
+                continue
+            limit_up, limit_down = calc_limits(
+                _reference_price(row.get("close"), row.get("change"))
+            )
+            if limit_up is None or limit_down is None:
+                continue
+            updates.append((symbol, date, limit_up, limit_down))
+    return updates
+
+
+def _backfill_limits_command(
+    session: requests.Session,
+    config: AppConfig,
+    args: argparse.Namespace,
+) -> None:
+    """--backfill-limits：只回補 stock_daily_raw 的 limit_up / limit_down。"""
+    if not args.backfill_start or not args.backfill_end:
+        print("錯誤：--backfill-limits 需搭配 --backfill-start 和 --backfill-end")
+        return
+
+    dates = _build_date_range(
+        _parse_date(args.backfill_start), _parse_date(args.backfill_end)
+    )
+    print(f"回補漲跌停 {len(dates)} 天：{dates[0]} ~ {dates[-1]}")
+
+    total = 0
+    for date in dates:
+        if date.weekday() >= 5:
+            continue
+        updates = _collect_limit_updates(session, date)
+        if not updates:
+            print(f"{date.isoformat()} 無可回補資料")
+            continue
+        n_updated = update_price_limits_batch(config.database_url, updates)
+        total += n_updated
+        print(f"{date.isoformat()} 更新 {n_updated} 檔")
+
+    print(f"漲跌停回補完成，共更新 {total} 列")
 
 
 def _build_daily_rows(
@@ -1493,6 +1574,11 @@ def _main_inner(
     # --dahu mode：只更新大戶持股佔比，其他資料不更新
     if args.dahu:
         _dahu_command(session, config, args, today)
+        return
+
+    # --backfill-limits mode：只回補漲跌停兩欄
+    if args.backfill_limits:
+        _backfill_limits_command(session, config, args)
         return
 
     # --backfill-stocks mode

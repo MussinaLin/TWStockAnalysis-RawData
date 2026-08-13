@@ -45,6 +45,7 @@ def _make_args(**overrides) -> object:
         backfill_start=None,
         backfill_end=None,
         backfill_stocks=None,
+        backfill_limits=False,
         update_shares=False,
         dahu=False,
         stocks=None,

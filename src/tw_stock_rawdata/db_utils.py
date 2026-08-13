@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+from decimal import Decimal
 
 import pandas as pd
 
@@ -287,6 +288,41 @@ def update_prev_day_margin_batch(
                 params = [_safe(data.get(c)) for c in _PREV_MARGIN_COLS]
                 params.extend([symbol, trade_date])
                 cur.execute(sql, params)
+                n_updated += cur.rowcount
+        conn.commit()
+    return n_updated
+
+
+def update_price_limits_batch(
+    database_url: str,
+    updates: list[tuple[str, dt.date, Decimal, Decimal]],
+) -> int:
+    """批次覆寫 stock_daily_raw 的 limit_up / limit_down。
+
+    只 UPDATE 已存在的 row，不 INSERT：回補只有這兩欄有值，若走 upsert 會 INSERT 出
+    一批其餘欄位全 NULL 的半套 row（見 CLAUDE.md「逐檔跳過半套資料」）。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        updates: list of (symbol, trade_date, limit_up, limit_down)。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計（不存在的 (symbol, trade_date) 不算）。
+    """
+    if not updates:
+        return 0
+
+    sql = (
+        "UPDATE stock_daily_raw SET limit_up = %s, limit_down = %s"
+        " WHERE symbol = %s AND trade_date = %s"
+    )
+
+    n_updated = 0
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            for symbol, trade_date, limit_up, limit_down in updates:
+                cur.execute(sql, [limit_up, limit_down, symbol, trade_date])
                 n_updated += cur.rowcount
         conn.commit()
     return n_updated
