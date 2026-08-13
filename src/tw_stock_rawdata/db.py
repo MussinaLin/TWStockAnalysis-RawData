@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS stock_daily_raw (
     short_margin_ratio          NUMERIC(8,6),
     foreign_holding_pct         NUMERIC(8,4),
     insti_holding_pct           NUMERIC(8,4),
+    limit_up                    NUMERIC(12,2),
+    limit_down                  NUMERIC(12,2),
     created_time                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_time                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (symbol, trade_date)
@@ -141,6 +143,10 @@ CREATE TABLE IF NOT EXISTS stock_holder_percent (
 ALTER TABLE stock_holder_percent ADD COLUMN IF NOT EXISTS retail_ratio NUMERIC(8,6);
 CREATE INDEX IF NOT EXISTS idx_holder_percent_trade_date
     ON stock_holder_percent (trade_date);
+
+-- 既有資料庫的線上 migration：補上後加的漲跌停欄（idempotent）。
+ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS limit_up   NUMERIC(12,2);
+ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS limit_down NUMERIC(12,2);
 
 -- Triggers for updated_time
 DO $$

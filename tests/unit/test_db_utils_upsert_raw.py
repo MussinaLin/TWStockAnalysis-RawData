@@ -172,5 +172,21 @@ def test_upsert_all_blank_symbols_skips_db(monkeypatch):
     assert not pool._conn.committed
 
 
+def test_raw_columns_include_price_limits() -> None:
+    """limit_up / limit_down 必須同時進 _RAW_COLUMNS 與 _RAW_DF_COLS，
+    否則 upsert 的欄位數與 placeholder 數會對不上。"""
+    assert "limit_up" in db_utils._RAW_COLUMNS
+    assert "limit_down" in db_utils._RAW_COLUMNS
+    assert "limit_up" in db_utils._RAW_DF_COLS
+    assert "limit_down" in db_utils._RAW_DF_COLS
+
+
+def test_raw_column_lists_stay_in_sync() -> None:
+    """_RAW_DF_COLS 是 _RAW_COLUMNS 去掉 trade_date 後的同序清單。"""
+    assert db_utils._RAW_DF_COLS == [
+        c for c in db_utils._RAW_COLUMNS if c != "trade_date"
+    ]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
