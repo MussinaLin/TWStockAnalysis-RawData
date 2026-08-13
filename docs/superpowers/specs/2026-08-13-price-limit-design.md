@@ -90,8 +90,7 @@ def calc_limits(ref: Decimal | None) -> tuple[Decimal | None, Decimal | None]
 
 ## 每日路徑改動
 
-1. **`sources.py`** — 各 `fetch_*` 函式不用動（回傳的原始 DataFrame 本就含漲跌價差欄），
-   但 `find_twse_ohlcv`（逐檔 `STOCK_DAY` 的解析 helper）回傳值要多帶 change。
+1. **`sources.py` 不用動。**
 2. **`prepare.py`**
    - `prepare_twse_day_all` / `prepare_tpex_quotes`：`_find_columns` spec 加 `change`，
      值走 `_clean_number`。
@@ -110,11 +109,16 @@ def calc_limits(ref: Decimal | None) -> tuple[Decimal | None, Decimal | None]
 
 ## 不變量：change 不可取自 STOCK_DAY_ALL
 
-`change` **不跟隨 OHLCV 的 fallback 順序**，而有自己的來源優先序：
+`change` **不跟隨 OHLCV 的 fallback 順序**，只從兩個批量來源取：
 
 ```
-MI_INDEX → STOCK_DAY（逐檔月表）→ TPEX quotes
+MI_INDEX（上市全市場） / TPEX quotes（上櫃全市場）
 ```
+
+這兩個來源合起來涵蓋 100% 標的池，且在 `_run_for_date` 中都是每日必抓，
+故不需要第三順位。逐檔 `STOCK_DAY` 月表雖然也帶 `X0.00` 標記可安全使用，
+但它只在「MI_INDEX 取得失敗**且**該檔 OHLCV 不完整」的窄縫才會被觸發，
+收益極小卻要改動 `sources.py` 的 `find_twse_ohlcv`，故不採用。
 
 **`STOCK_DAY_ALL` 永不供應 `change`。** 它在除權息日給 `Change = 0.0000` 且不帶任何標記，
 而它是 OHLCV fallback 鏈的第一順位；若讓它供應 change，除權息日會算出
@@ -126,7 +130,7 @@ MI_INDEX → STOCK_DAY（逐檔月表）→ TPEX quotes
 優先序天然依市場別分流。`MI_INDEX` 在 `_run_for_date` 中是**無條件抓取**
 （非等 OHLCV fallback 觸發才抓），故上市股必定取得到。
 
-三個來源都取不到時 `change` 為 `None`，漲跌停寫 NULL —— 符合「不猜」的設計。
+兩個來源都取不到時 `change` 為 `None`，漲跌停寫 NULL —— 符合「不猜」的設計。
 
 此條需寫入 `CLAUDE.md` 的 Gotchas 章節。
 
