@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -477,7 +478,11 @@ def _build_daily_rows(
             session, date, symbol, twse_day_all, twse_mi_index,
             tpex_quotes, twse_month_cache,
         )
-        open_price, close_price, high_price, low_price, volume = ohlcv
+        open_price = ohlcv.open
+        close_price = ohlcv.close
+        high_price = ohlcv.high
+        low_price = ohlcv.low
+        volume = ohlcv.volume
 
         # 逐檔跳過 1：無價格（OHLC 來源對該檔失敗或當天無交易）
         if close_price is None and open_price is None:
@@ -571,6 +576,20 @@ def _build_daily_rows(
     return pd.DataFrame(rows)
 
 
+class OhlcvResult(NamedTuple):
+    """單檔單日的 OHLCV 與漲跌價差。
+
+    change 有自己的來源規則（見 _fetch_ohlcv_with_fallback），不跟隨 OHLCV 補洞。
+    """
+
+    open: float | None
+    close: float | None
+    high: float | None
+    low: float | None
+    volume: int | None
+    change: float | None
+
+
 def _fetch_ohlcv_with_fallback(
     session: requests.Session,
     date: dt.date,
@@ -579,10 +598,14 @@ def _fetch_ohlcv_with_fallback(
     twse_mi_index: pd.DataFrame | None,
     tpex_quotes: pd.DataFrame,
     twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame],
-) -> tuple[float | None, float | None, float | None, float | None, int | None]:
+) -> OhlcvResult:
     """Fetch OHLCV data with fallback chain: DAY_ALL -> STOCK_DAY -> MI_INDEX -> TPEX."""
     open_price = close_price = high_price = low_price = volume = None
+    change = None
 
+    # 注意：change 刻意不從 STOCK_DAY_ALL 取 —— 它在除權息日給 Change=0.0000
+    # 且不帶任何標記，會算出「參考價 = 收盤」的錯值。change 只從 MI_INDEX /
+    # TPEX quotes 取，見本函式末尾的獨立區塊。
     # Try TWSE STOCK_DAY_ALL
     if twse_day_all is not None:
         row = twse_day_all.loc[twse_day_all["symbol"] == symbol]
@@ -645,7 +668,26 @@ def _fetch_ohlcv_with_fallback(
             low_price = row.iloc[0].get("low")
             volume = row.iloc[0].get("volume")
 
-    return open_price, close_price, high_price, low_price, volume
+    # change（漲跌價差）獨立取得：不受 OHLCV 是否齊全影響，也不觸發逐檔 HTTP。
+    # MI_INDEX 涵蓋全部上市、TPEX quotes 涵蓋全部上櫃，兩者在 _run_for_date 都是
+    # 每日必抓；兩邊都沒有時留 None，由呼叫端寫成 NULL（不以前日收盤推測）。
+    if change is None and twse_mi_index is not None:
+        row = twse_mi_index.loc[twse_mi_index["symbol"] == symbol]
+        if not row.empty:
+            change = row.iloc[0].get("change")
+    if change is None and not tpex_quotes.empty:
+        row = tpex_quotes.loc[tpex_quotes["symbol"] == symbol]
+        if not row.empty:
+            change = row.iloc[0].get("change")
+
+    return OhlcvResult(
+        open=open_price,
+        close=close_price,
+        high=high_price,
+        low=low_price,
+        volume=volume,
+        change=change,
+    )
 
 
 def _get_institutional_data(

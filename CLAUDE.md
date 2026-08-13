@@ -61,3 +61,9 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
   TWSE / TPEX 暫時性 5xx（如 520）靠 `_retry_on_transient` 吸收。
 - **`--backfill-stocks` 不動 `market_daily`**：逐檔回補只寫 `stock_daily_raw`，避免對
   共用大盤表造成非預期副作用。
+- **`change` 不可取自 `STOCK_DAY_ALL`**：漲跌價差只從 `MI_INDEX`（上市）與 TPEX
+  quotes（上櫃）取。`STOCK_DAY_ALL` 在除權息日給 `Change=0.0000` 且無任何標記，
+  而它是 `_fetch_ohlcv_with_fallback` 的第一順位；若讓它供應 change，除權息日會
+  算出「參考價 = 收盤」的錯誤漲跌停價。另：change 的取得寫成獨立區塊，**不可**加進
+  `STOCK_DAY` 逐檔月表區塊的 `any(v is None ...)` 觸發條件（那是逐檔 HTTP，
+  加進去會讓每檔都多打一次 API）。
