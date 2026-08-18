@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import time
 from decimal import Decimal
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
@@ -73,6 +75,33 @@ from .sources import (
 )
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+
+
+@contextlib.contextmanager
+def _phase(label: str):
+    """為一個執行階段印出起訖與耗時，用來歸因啟動到第一行進度之間的空白。
+
+    每日流程在逐檔迴圈之前串了 DB 連線、schema、休市檢查與數組整批抓取，
+    happy path 上全部不印任何東西；整批抓取又各自包在長窗口 retry 裡
+    （RETRY_ATTEMPTS=6，backoff 上限約 56 秒），慢下來時無從得知慢在哪一段。
+
+    進入時就印「開始」——階段若卡住不返回，至少定位得到是哪一段。
+    例外原樣往外拋，只是順帶把耗時印出來（最貴的階段往往正是重試失敗那個）。
+    輸出一律 flush：容器裡 stdout 是區塊緩衝，不 flush 就看不到即時進度。
+    """
+    print(f"[階段] {label} 開始", flush=True)
+    started = time.monotonic()
+    try:
+        yield
+    except BaseException as exc:
+        print(
+            f"[階段] {label} 失敗 {time.monotonic() - started:.1f}s"
+            f"（{type(exc).__name__}）",
+            flush=True,
+        )
+        raise
+    else:
+        print(f"[階段] {label} 完成 {time.monotonic() - started:.1f}s", flush=True)
 
 # Cache for issued shares (doesn't change often)
 _issued_shares_cache: dict[str, int] = {}
@@ -1048,7 +1077,8 @@ def _run_for_date(
 
     # Fetch TWSE 3-institutional data
     try:
-        twse_3insti = _fetch_twse_3insti(session, date)
+        with _phase(f"{sheet_name} TWSE 三大法人"):
+            twse_3insti = _fetch_twse_3insti(session, date)
     except DataUnavailableError as exc:
         print(f"{sheet_name} TWSE 資料尚未公告或取得失敗：{exc}")
         twse_3insti = pd.DataFrame(columns=["symbol", "foreign_net", "trust_net", "dealer_net"])
@@ -1061,7 +1091,8 @@ def _run_for_date(
     twse_day_all_date = None
     if date == today:
         try:
-            twse_day_all_raw, twse_day_all_date = fetch_twse_stock_day_all(session)
+            with _phase(f"{sheet_name} TWSE STOCK_DAY_ALL"):
+                twse_day_all_raw, twse_day_all_date = fetch_twse_stock_day_all(session)
             if twse_day_all_date is None:
                 print(f"{sheet_name} TWSE STOCK_DAY_ALL 無法解析日期，略過使用")
             elif twse_day_all_date != date:
@@ -1075,7 +1106,8 @@ def _run_for_date(
     twse_mi_index = None
     twse_mi_index_date = None
     try:
-        twse_mi_index_raw, twse_mi_index_date = fetch_twse_mi_index(session, date)
+        with _phase(f"{sheet_name} TWSE MI_INDEX"):
+            twse_mi_index_raw, twse_mi_index_date = fetch_twse_mi_index(session, date)
         if twse_mi_index_date is None and not twse_mi_index_raw.empty and date == today:
             twse_mi_index_date = date
         if twse_mi_index_date == date:
@@ -1097,9 +1129,10 @@ def _run_for_date(
 
     # Fetch TPEX data
     try:
-        tpex_quotes, tpex_quotes_date, tpex_3insti, tpex_3insti_date = _fetch_tpex_sources(
-            session, date
-        )
+        with _phase(f"{sheet_name} TPEX 整批（日行情＋三大法人）"):
+            tpex_quotes, tpex_quotes_date, tpex_3insti, tpex_3insti_date = _fetch_tpex_sources(
+                session, date
+            )
         if tpex_quotes_date and tpex_quotes_date != date:
             print(f"{sheet_name} TPEX 日行情日期不匹配：{tpex_quotes_date} != {date}")
         if tpex_3insti_date and tpex_3insti_date != date:
@@ -1125,7 +1158,8 @@ def _run_for_date(
     elif date == today:
         # Use dated MI_MARGN report for today's data (all stocks at once)
         try:
-            twse_margin_raw, twse_margin_date = fetch_twse_margin(session, date)
+            with _phase(f"{sheet_name} TWSE 融資融券"):
+                twse_margin_raw, twse_margin_date = fetch_twse_margin(session, date)
             # 嚴格驗證資料日期 == 當日；不符（TWSE 尚未發布或回舊資料）就不寫，
             # 缺值由 D+1 的 MoneyDJ 修正機制補，避免 D-1 值被誤標成 D。
             if twse_margin_date == date:
@@ -1137,7 +1171,8 @@ def _run_for_date(
 
         # Try V2 first (supports date parameter), fallback to OpenAPI
         try:
-            tpex_margin_raw, tpex_margin_date = fetch_tpex_margin_v2(session, date)
+            with _phase(f"{sheet_name} TPEX 融資融券 V2"):
+                tpex_margin_raw, tpex_margin_date = fetch_tpex_margin_v2(session, date)
             if tpex_margin_date is None or tpex_margin_date == date:
                 tpex_margin = prepare_tpex_margin_v2(tpex_margin_raw)
             else:
@@ -1147,7 +1182,8 @@ def _run_for_date(
 
         if tpex_margin is None:
             try:
-                tpex_margin_raw, tpex_margin_date = fetch_tpex_margin(session)
+                with _phase(f"{sheet_name} TPEX 融資融券 OpenAPI（V2 回退）"):
+                    tpex_margin_raw, tpex_margin_date = fetch_tpex_margin(session)
                 if tpex_margin_date is None or tpex_margin_date == date:
                     tpex_margin = prepare_tpex_margin(tpex_margin_raw)
                 else:
@@ -1182,23 +1218,26 @@ def _run_for_date(
             twse_margin = pd.DataFrame(margin_rows)
 
     # Fetch holding percentage data (per-stock, when not using cache)
+    # daily 模式不帶 cache，故此處是逐檔對 MoneyDJ 各打一次；失敗一律吞掉，
+    # 沒有計時就完全看不出它在整段啟動時間裡佔多少。
     if holding_pct_cache is None:
         holding_pct_cache = {}
-        for _, item in holdings.iterrows():
-            symbol = str(item["symbol"]).strip()
-            try:
-                raw = fetch_moneydj_holding_pct(session, symbol, date, date)
-                df = prepare_moneydj_holding_pct(raw)
-                holding_pct_cache[symbol] = {}
-                for _, row in df.iterrows():
-                    row_date = row["date"]
-                    if isinstance(row_date, dt.date):
-                        holding_pct_cache[symbol][row_date] = {
-                            "foreign_holding_pct": row.get("foreign_holding_pct"),
-                            "insti_holding_pct": row.get("insti_holding_pct"),
-                        }
-            except (DataUnavailableError, requests.RequestException):
-                pass
+        with _phase(f"{sheet_name} 外資/法人持股佔比（逐檔 {len(holdings)} 檔）"):
+            for _, item in holdings.iterrows():
+                symbol = str(item["symbol"]).strip()
+                try:
+                    raw = fetch_moneydj_holding_pct(session, symbol, date, date)
+                    df = prepare_moneydj_holding_pct(raw)
+                    holding_pct_cache[symbol] = {}
+                    for _, row in df.iterrows():
+                        row_date = row["date"]
+                        if isinstance(row_date, dt.date):
+                            holding_pct_cache[symbol][row_date] = {
+                                "foreign_holding_pct": row.get("foreign_holding_pct"),
+                                "insti_holding_pct": row.get("insti_holding_pct"),
+                            }
+                except (DataUnavailableError, requests.RequestException):
+                    pass
 
     # 三大法人來源健康度（已過 twse_confirmed，交易日下「空」＝該來源 fetch 失敗）。
     # 逐檔寫入時用來決定該市場個股是否跳過（融資融券非必要，不納入）。
@@ -1206,25 +1245,26 @@ def _run_for_date(
     tpex_insti_ok = not tpex_3insti.empty
 
     # Build daily data
-    output_df = _build_daily_rows(
-        session=session,
-        date=date,
-        holdings=holdings,
-        twse_3insti=twse_3insti,
-        twse_day_all=twse_day_all,
-        twse_mi_index=twse_mi_index,
-        tpex_quotes=tpex_quotes,
-        tpex_3insti=tpex_3insti,
-        twse_month_cache=twse_month_cache,
-        issued_shares=issued_shares,
-        twse_margin=twse_margin,
-        tpex_margin=tpex_margin,
-        margin_cache=margin_cache,
-        holding_pct_cache=holding_pct_cache,
-        name_map=name_map,
-        twse_insti_ok=twse_insti_ok,
-        tpex_insti_ok=tpex_insti_ok,
-    )
+    with _phase(f"{sheet_name} 逐檔組列（{len(holdings)} 檔）"):
+        output_df = _build_daily_rows(
+            session=session,
+            date=date,
+            holdings=holdings,
+            twse_3insti=twse_3insti,
+            twse_day_all=twse_day_all,
+            twse_mi_index=twse_mi_index,
+            tpex_quotes=tpex_quotes,
+            tpex_3insti=tpex_3insti,
+            twse_month_cache=twse_month_cache,
+            issued_shares=issued_shares,
+            twse_margin=twse_margin,
+            tpex_margin=tpex_margin,
+            margin_cache=margin_cache,
+            holding_pct_cache=holding_pct_cache,
+            name_map=name_map,
+            twse_insti_ok=twse_insti_ok,
+            tpex_insti_ok=tpex_insti_ok,
+        )
 
     if output_df.empty:
         print(f"{sheet_name} 找不到任何成份股資料。")
@@ -1236,12 +1276,14 @@ def _run_for_date(
 
     sheet_names.add(sheet_name)
 
-    upsert_daily_raw(config.database_url, date, output_df)
+    with _phase(f"{sheet_name} 寫入 stock_daily_raw（{len(output_df)} 列）"):
+        upsert_daily_raw(config.database_url, date, output_df)
 
     # Fetch and upsert market daily data (大盤行情)。market_daily 與個股無關，
     # 特定股票回補 (--backfill-stocks) 不需更新，避免對共用大盤表的非預期副作用。
     if write_market_daily:
-        _fetch_and_upsert_market_daily(session, date, config)
+        with _phase(f"{sheet_name} 大盤行情 market_daily"):
+            _fetch_and_upsert_market_daily(session, date, config)
 
     # Daily 模式（非 backfill）下，用 MoneyDJ 修正 D-1 個股融資融券
     # backfill 已透過 _prefetch_margin_cache 預取修正版，不需再修
@@ -1578,8 +1620,9 @@ def main() -> None:
         print("錯誤：需設定 USE_DB=true 和 DATABASE_URL")
         return
 
-    pool = get_pool(config.database_url)
-    init_schema(pool)
+    with _phase("DB 連線與 schema"):
+        pool = get_pool(config.database_url)
+        init_schema(pool)
 
     try:
         _main_inner(config, args, today, target_date)
@@ -1599,7 +1642,8 @@ def _main_inner(
     # 休市開關：只擋純 daily 模式（排程用）；讀不到一律 fail-open 照常執行
     if _is_daily_mode(args):
         try:
-            value = get_config_value(db_url, "is_trading_day")
+            with _phase("休市檢查"):
+                value = get_config_value(db_url, "is_trading_day")
         except psycopg.Error as exc:
             print(f"警告：讀取 config.is_trading_day 失敗（{exc}），視為交易日照常執行")
         else:
@@ -1677,7 +1721,8 @@ def _main_inner(
         return
 
     # Load enabled stocks from DB
-    enabled_rows = get_enabled_stocks(db_url)
+    with _phase("載入啟用個股"):
+        enabled_rows = get_enabled_stocks(db_url)
     if not enabled_rows:
         print("錯誤：資料庫中無啟用的股票（stocks.enabled = TRUE）")
         return
@@ -1687,8 +1732,8 @@ def _main_inner(
         {"symbol": r[0], "name": r[1]} for r in enabled_rows
     ])
 
-    print("載入發行股數...")
-    issued_shares = _get_issued_shares(session, config)
+    with _phase("載入發行股數"):
+        issued_shares = _get_issued_shares(session, config)
     twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame] = {}
 
     # Backfill mode
