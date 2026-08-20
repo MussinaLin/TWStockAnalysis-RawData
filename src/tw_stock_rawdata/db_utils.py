@@ -159,15 +159,41 @@ def load_stock_shares(database_url: str) -> dict[str, int]:
 
 def get_enabled_stocks(
     database_url: str,
-) -> list[tuple[str, str, int | None, str]]:
-    """Return list of (symbol, name, industry_type, industry_desc) for enabled stocks."""
+) -> list[tuple[str, str, int | None, str, str | None]]:
+    """Return (symbol, name, industry_type, industry_desc, market_type) for enabled stocks.
+
+    market_type 為 'twse' / 'tpex'（未填則 None），用來決定該檔能不能走 TWSE 的
+    逐檔月表 fallback，見 `_fetch_ohlcv_with_fallback`。
+    """
     pool = get_pool(database_url)
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT symbol, name, industry_type, industry_desc"
+            "SELECT symbol, name, industry_type, industry_desc, market_type"
             " FROM stocks WHERE enabled = TRUE ORDER BY symbol"
         ).fetchall()
-    return [(r[0], r[1], r[2], r[3]) for r in rows]
+    return [(r[0], r[1], r[2], r[3], _norm_market_type(r[4])) for r in rows]
+
+
+def _norm_market_type(value: object) -> str | None:
+    """把 DB 的 market_type 正規化成 'twse' / 'tpex' / None。"""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text or None
+
+
+def load_market_types(database_url: str) -> dict[str, str]:
+    """Load symbol -> market_type ('twse'/'tpex') mapping from stocks table.
+
+    給 `--backfill-stocks` 用：那條路徑的個股清單直接來自 CLI 參數，沒有市場別，
+    少了它上櫃股每檔每日都會白打一次 TWSE 月表。
+    """
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT symbol, market_type FROM stocks WHERE market_type IS NOT NULL"
+        ).fetchall()
+    return {r[0]: mt for r in rows if (mt := _norm_market_type(r[1])) is not None}
 
 
 # ---------------------------------------------------------------------------

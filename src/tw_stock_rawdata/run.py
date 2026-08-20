@@ -22,6 +22,7 @@ from .db_utils import (
     find_consensus_prev_trade_date,
     get_config_value,
     get_enabled_stocks,
+    load_market_types,
     load_stock_names,
     load_stock_shares,
     load_symbols_for_date,
@@ -452,6 +453,19 @@ def _fetch_twse_3insti(session: requests.Session, date: dt.date) -> pd.DataFrame
     return prepare_twse_3insti(twse_t86)
 
 
+def _row_market_type(item) -> str | None:
+    """從 holdings 的一列取出正規化後的 market_type（'twse' / 'tpex' / None）。
+
+    holdings 可能根本沒有這欄（`--backfill-stocks` 由 CLI 代號組出來），
+    有欄時 pandas 也會把缺值變成 NaN，兩種都要收斂成 None。
+    """
+    value = item.get("market_type")
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip().lower()
+    return text or None
+
+
 def _stock_sources_ok(
     *,
     is_tpex: bool,
@@ -583,7 +597,13 @@ def _build_daily_rows(
     1. 無價格（open/close 皆 None）：OHLC 來源對該檔失敗或當天無交易。
     2. 該檔市場別的三大法人來源 fetch 失敗（見 _stock_sources_ok）。
     跳過的個股留待重跑 / backfill 補上（搭配 upsert 的 COALESCE）。
-    市場別由「有價格」個股的價格來源判定：該檔出現在 tpex_quotes ⟹ TPEX，否則 TWSE。
+
+    市場別有兩個獨立訊號，用途不同、不要互相取代：
+    - 條件 2 的 gating 用「該檔是否出現在當日 tpex_quotes」判定，反映的是
+      「這檔今天的價格是誰供應的」，必須跟著當日實際來源走。
+    - OHLCV fallback 用 holdings 的 `stocks.market_type`（見 _fetch_ohlcv_with_fallback），
+      反映的是「這檔本質上屬於哪個市場」，不能依賴當日 tpex_quotes 是否抓成功
+      —— 否則 TPEX 整批失敗時，上櫃股又會退回去打註定沒資料的 TWSE 月表。
     """
     rows: list[dict] = []
     total = len(holdings)
@@ -605,6 +625,7 @@ def _build_daily_rows(
         ohlcv = _fetch_ohlcv_with_fallback(
             session, date, symbol, twse_day_all, twse_mi_index,
             tpex_quotes, twse_month_cache,
+            market_type=_row_market_type(item),
         )
         open_price = ohlcv.open
         close_price = ohlcv.close
@@ -765,15 +786,28 @@ def _fetch_ohlcv_with_fallback(
     twse_mi_index: pd.DataFrame | None,
     tpex_quotes: pd.DataFrame,
     twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame],
+    market_type: str | None = None,
 ) -> OhlcvResult:
-    """Fetch OHLCV data with fallback chain: DAY_ALL -> STOCK_DAY -> MI_INDEX -> TPEX."""
+    """Fetch OHLCV with fallback chain: DAY_ALL -> MI_INDEX -> TPEX -> STOCK_DAY.
+
+    順序的重點是「全市場批次來源優先，逐檔 HTTP 墊底」：前三個來源都是
+    `_run_for_date` 每日各抓一次的整批資料（記憶體查表，零額外請求），只有
+    STOCK_DAY 月表是每檔各打一次 www.twse.com.tw。把它排到最後，正常日子就完全
+    不會觸發 —— 之前它排在 MI_INDEX 前面，只要 STOCK_DAY_ALL 有任何一欄沒補上
+    （例如 2026-08-19 它無法解析日期而整批棄用），全部個股就會各打一次 API，
+    幾百次請求足以踩到 TWSE 限流，而限流回應與「沒資料」無法區分。
+
+    market_type 為 "tpex" 時完全跳過 STOCK_DAY：那支 API 只有上市資料，對上櫃股
+    必定回「很抱歉，沒有符合條件的資料!」，打了純粹浪費限流配額。未知（None）時
+    維持既有行為往下打，不誤殺 —— `--backfill-stocks` 直接給代號時就沒有市場別。
+    """
     open_price = close_price = high_price = low_price = volume = None
     change = None
 
     # 注意：change 刻意不從 STOCK_DAY_ALL 取 —— 它在除權息日給 Change=0.0000
     # 且不帶任何標記，會算出「參考價 = 收盤」的錯值。change 只從 MI_INDEX /
     # TPEX quotes 取，見本函式末尾的獨立區塊。
-    # Try TWSE STOCK_DAY_ALL
+    # Try TWSE STOCK_DAY_ALL（全市場批次）
     if twse_day_all is not None:
         row = twse_day_all.loc[twse_day_all["symbol"] == symbol]
         if not row.empty:
@@ -783,8 +817,37 @@ def _fetch_ohlcv_with_fallback(
             low_price = row.iloc[0].get("low")
             volume = row.iloc[0].get("volume")
 
-    # Try TWSE STOCK_DAY (monthly)
+    # Try TWSE MI_INDEX（全市場批次，涵蓋全部上市）
     if any(v is None for v in [open_price, close_price, high_price, low_price, volume]):
+        if twse_mi_index is not None:
+            row = twse_mi_index.loc[twse_mi_index["symbol"] == symbol]
+            if not row.empty:
+                if open_price is None:
+                    open_price = row.iloc[0]["open"]
+                if close_price is None:
+                    close_price = row.iloc[0]["close"]
+                if high_price is None:
+                    high_price = row.iloc[0].get("high")
+                if low_price is None:
+                    low_price = row.iloc[0].get("low")
+                if volume is None:
+                    volume = row.iloc[0].get("volume")
+
+    # Try TPEX quotes（全市場批次，涵蓋全部上櫃）
+    if open_price is None and close_price is None:
+        row = tpex_quotes.loc[tpex_quotes["symbol"] == symbol]
+        if not row.empty:
+            open_price = row.iloc[0]["open"]
+            close_price = row.iloc[0]["close"]
+            high_price = row.iloc[0].get("high")
+            low_price = row.iloc[0].get("low")
+            volume = row.iloc[0].get("volume")
+
+    # Try TWSE STOCK_DAY (monthly) —— 唯一的逐檔 HTTP，最後手段。
+    # 上櫃股直接跳過：TWSE 月表沒有上櫃資料，打了也只是消耗限流配額。
+    if market_type != "tpex" and any(
+        v is None for v in [open_price, close_price, high_price, low_price, volume]
+    ):
         month_start = date.replace(day=1)
         cache_key = (symbol, month_start)
         twse_day = twse_month_cache.get(cache_key)
@@ -808,32 +871,6 @@ def _fetch_ohlcv_with_fallback(
                 close_price = ohlcv[3]
             if volume is None:
                 volume = ohlcv[4]
-
-    # Try TWSE MI_INDEX
-    if any(v is None for v in [open_price, close_price, high_price, low_price, volume]):
-        if twse_mi_index is not None:
-            row = twse_mi_index.loc[twse_mi_index["symbol"] == symbol]
-            if not row.empty:
-                if open_price is None:
-                    open_price = row.iloc[0]["open"]
-                if close_price is None:
-                    close_price = row.iloc[0]["close"]
-                if high_price is None:
-                    high_price = row.iloc[0].get("high")
-                if low_price is None:
-                    low_price = row.iloc[0].get("low")
-                if volume is None:
-                    volume = row.iloc[0].get("volume")
-
-    # Try TPEX quotes
-    if open_price is None and close_price is None:
-        row = tpex_quotes.loc[tpex_quotes["symbol"] == symbol]
-        if not row.empty:
-            open_price = row.iloc[0]["open"]
-            close_price = row.iloc[0]["close"]
-            high_price = row.iloc[0].get("high")
-            low_price = row.iloc[0].get("low")
-            volume = row.iloc[0].get("volume")
 
     # change（漲跌價差）獨立取得：不受 OHLCV 是否齊全影響，也不觸發逐檔 HTTP。
     # MI_INDEX 涵蓋全部上市、TPEX quotes 涵蓋全部上櫃，兩者在 _run_for_date 都是
@@ -1680,7 +1717,12 @@ def _main_inner(
             print("錯誤：--backfill-stocks 未指定任何股票代號")
             return
 
-        stocks_holdings = pd.DataFrame([{"symbol": s, "name": ""} for s in stock_list])
+        # 市場別查 DB（CLI 只給代號）；查不到的留 None，退回既有 fallback 行為。
+        market_types = load_market_types(db_url)
+        stocks_holdings = pd.DataFrame([
+            {"symbol": s, "name": "", "market_type": market_types.get(s)}
+            for s in stock_list
+        ])
         start_date = _parse_date(args.backfill_start)
         end_date = _parse_date(args.backfill_end)
         backfill_dates = _build_date_range(start_date, end_date)
@@ -1729,7 +1771,7 @@ def _main_inner(
 
     name_map = {r[0]: r[1] for r in enabled_rows}
     holdings = pd.DataFrame([
-        {"symbol": r[0], "name": r[1]} for r in enabled_rows
+        {"symbol": r[0], "name": r[1], "market_type": r[4]} for r in enabled_rows
     ])
 
     with _phase("載入發行股數"):

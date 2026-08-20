@@ -67,11 +67,16 @@ CREATE TABLE IF NOT EXISTS stocks (
     industry_desc      VARCHAR(100) NOT NULL DEFAULT '',
     volume_type        SMALLINT     NOT NULL DEFAULT 0,
     issued_shares      BIGINT       DEFAULT NULL,
+    market_type        VARCHAR(4)   DEFAULT NULL,
     enabled            BOOLEAN      NOT NULL DEFAULT FALSE,
     alpha_pick_enabled BOOLEAN      NOT NULL DEFAULT TRUE,
     created_time       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_time       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+-- 既有資料庫的線上 migration：補上市場別欄（idempotent）。
+-- 值為 'twse' / 'tpex'，由下游 TWStockAnalysis 維護；本 repo 只讀不寫，
+-- 用來讓上櫃股跳過 TWSE 逐檔月表 fallback（見 _fetch_ohlcv_with_fallback）。
+ALTER TABLE stocks ADD COLUMN IF NOT EXISTS market_type VARCHAR(4);
 CREATE INDEX IF NOT EXISTS idx_stocks_enabled ON stocks (enabled) WHERE enabled = TRUE;
 
 -- stock_daily_raw (partitioned by year)

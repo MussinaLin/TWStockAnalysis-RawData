@@ -34,6 +34,7 @@ cp .env.example .env
   該站對同 IP 高頻請求會限流，回 HTTP 200 + `{"stat":"很抱歉，沒有符合條件的資料!"}`
   的空殼（與真休市同字串），導致被誤判成沒資料而跳過。加最小間隔可從源頭避免觸發；
   若仍偶發，可調大（例如 `1.5`）。僅影響 `www.twse.com.tw`，openapi / TPEX 不受影響。
+  真正的關鍵是**壓低請求總數**，見「OHLCV 來源順序」。
 
 ## CLI 指令
 
@@ -103,6 +104,31 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 > `NULL`（例如日後排除新上市櫃前五日），因 upsert 採 `COALESCE`、回補對算出
 > `None` 的個股直接跳過，兩條寫入路徑都無法把已寫入的值清成 `NULL`，需手動
 > `UPDATE stock_daily_raw SET limit_up = NULL, limit_down = NULL WHERE ...`。
+
+### OHLCV 來源順序（逐檔請求最小化）
+
+`_fetch_ohlcv_with_fallback` 的 fallback 鏈是：
+
+```
+STOCK_DAY_ALL → MI_INDEX → TPEX quotes → STOCK_DAY 月表
+  (整批)         (整批)      (整批)        (逐檔 HTTP，最後手段)
+```
+
+前三個都是每日各抓一次的全市場批次資料，逐檔組列時只是記憶體查表、零額外請求；
+只有 `STOCK_DAY` 月表是**每檔各打一次** `www.twse.com.tw`。順序的重點就是把它墊底：
+
+- **上櫃股（`stocks.market_type = 'tpex'`）完全跳過 `STOCK_DAY`。** 那支 API 只有上市
+  資料，對上櫃代號必定回「很抱歉，沒有符合條件的資料!」，打了純粹消耗限流配額。
+- `market_type` 未知（`NULL`，或 `--backfill-stocks` 查不到該代號）時維持既有行為往下
+  打，不誤殺。`--backfill-stocks` 會另外查 DB 補上市場別。
+- `market_type` 欄由下游 TWStockAnalysis repo 維護，本 repo 只讀不寫；`db.py` 只保留
+  `ADD COLUMN IF NOT EXISTS` 讓全新 DB 也建得起來。
+
+**為什麼順序重要**：`STOCK_DAY` 原本排在 `MI_INDEX` 前面，只要 `STOCK_DAY_ALL` 沒補滿
+五個欄位就會觸發。2026-08-19 它「無法解析日期」而整批棄用，結果 217 檔全部各打一次
+API（`逐檔組列` 階段耗時 224 秒 ≈ 217 × `TWSE_MIN_INTERVAL`），數百次請求足以踩到
+TWSE 限流——而限流回應與「真的沒資料」是同一個字串，無法區分。`MI_INDEX` 本來就涵蓋
+全部上市股且同樣有五欄，提前之後同一情境的逐檔請求從 217 次降到 1 次。
 
 ### 休市開關（config.is_trading_day）
 
