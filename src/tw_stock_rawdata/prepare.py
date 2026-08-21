@@ -8,7 +8,13 @@ import pandas as pd
 
 import datetime as dt
 
-from .sources import _clean_int, _clean_number, _parse_roc_date, DataUnavailableError
+from .sources import (
+    _clean_int,
+    _clean_number,
+    _parse_roc_date,
+    _parse_roc_date_compact,
+    DataUnavailableError,
+)
 
 
 def _normalize_col(text: str) -> str:
@@ -627,6 +633,110 @@ def prepare_tpex_margin_v2(df: pd.DataFrame) -> pd.DataFrame:
     result["short_margin_ratio"] = ratio.where(mb != 0, other=None)
 
     return result
+
+
+# 處置公告裡描述撮合頻率的句子。TWSE 用國字（「約每二十五分鐘撮合一次」），
+# TPEX 用阿拉伯數字（「約每25分鐘撮合一次」），兩種都要吃。
+_DISPOSITION_MINUTES_RE = re.compile(
+    r"約每([0-9０-９一二三四五六七八九十]+)分鐘撮合一次"
+)
+_CN_DIGITS = {
+    "零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+
+
+def _cn_to_int(text: str) -> int | None:
+    """把「25」「２５」「十」「二十」「二十五」等轉成 int；無法解析回 None。
+
+    只需支援處置公告出現過的量級（實測值域 5/10/20/25/45/60），故十進位規則
+    只處理「X十Y」單一個十位，不做完整中文數字剖析。
+    """
+    normalized = text.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    if not normalized:
+        return None
+    if normalized.isdigit():
+        return int(normalized)
+    if "十" not in normalized:
+        return _CN_DIGITS.get(normalized)
+
+    head, _, tail = normalized.partition("十")
+    tens = 1 if not head else _CN_DIGITS.get(head)
+    ones = 0 if not tail else _CN_DIGITS.get(tail)
+    if tens is None or ones is None:
+        return None
+    return tens * 10 + ones
+
+
+def _parse_disposition_period(value: str) -> tuple[dt.date | None, dt.date | None]:
+    """拆解處置起訖字串成 (start, end)。
+
+    分隔符兩家不同：TWSE 用全形「～」、TPEX v2 用半形「~」。日期為民國年，
+    v2 給 `115/06/30` 形式，OpenAPI 快照版則是 `1150630`，兩種都接。
+    """
+    parts = re.split(r"[～~]", str(value).strip())
+    if len(parts) != 2:
+        return None, None
+    bounds = []
+    for part in parts:
+        text = part.strip()
+        bounds.append(_parse_roc_date(text) or _parse_roc_date_compact(text))
+    return bounds[0], bounds[1]
+
+
+_DISPOSITION_COLUMNS = ["symbol", "start_date", "end_date", "match_minutes"]
+
+
+def prepare_disposition(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize 處置公告（TWSE / TPEX 通用）成 symbol/start_date/end_date/match_minutes。
+
+    兩家欄位名幾乎一致，只有期間欄用字不同（TWSE「處置起迄時間」、TPEX「處置起訖時間」），
+    故以關鍵字比對吃下兩者。
+
+    丟棄的列：
+    - 證券代號為空 —— TPEX 會夾帶「本日無處置資料」的佔位列。
+    - 處置期間無法解析成合法且 start <= end 的民國日期區間。
+    撮合分鐘數解析不到時仍保留該列、match_minutes 為 None（處置這件事仍然成立）。
+
+    名單含權證（6 碼）與可轉債（5 碼），此處刻意不濾：呼叫端只寫 stocks 內的
+    symbol，非個股自然被排除。可轉債的處置內容偶爾夾兩段撮合描述（併同標的股票
+    處置），一律取第一個出現的數字＝該公告主區間的撮合頻率。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_DISPOSITION_COLUMNS)
+
+    cols = _find_columns(df, {
+        "symbol": [["證券代號"], ["代號"]],
+        "period": [["處置起迄"], ["處置起訖"], ["處置期間"]],
+        "detail": [["處置內容"]],
+    })
+    if not cols["symbol"] or not cols["period"]:
+        raise DataUnavailableError("處置股資料缺少證券代號或處置期間欄位。")
+
+    rows = []
+    for _, row in df.iterrows():
+        symbol = str(row[cols["symbol"]]).strip()
+        if not symbol or symbol.lower() == "nan":
+            continue
+
+        start_date, end_date = _parse_disposition_period(row[cols["period"]])
+        if start_date is None or end_date is None or end_date < start_date:
+            continue
+
+        match_minutes = None
+        if cols["detail"]:
+            found = _DISPOSITION_MINUTES_RE.search(str(row[cols["detail"]]))
+            if found:
+                match_minutes = _cn_to_int(found.group(1))
+
+        rows.append({
+            "symbol": symbol,
+            "start_date": start_date,
+            "end_date": end_date,
+            "match_minutes": match_minutes,
+        })
+
+    return pd.DataFrame(rows, columns=_DISPOSITION_COLUMNS)
 
 
 def prepare_moneydj_margin(df: pd.DataFrame) -> pd.DataFrame:

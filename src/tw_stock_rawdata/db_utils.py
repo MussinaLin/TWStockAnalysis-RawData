@@ -23,6 +23,7 @@ _RAW_COLUMNS = [
     "margin_balance", "margin_change", "short_sell", "short_buy",
     "short_balance", "short_change", "short_margin_ratio",
     "foreign_holding_pct", "insti_holding_pct", "limit_up", "limit_down",
+    "is_disposition", "disposition_match_minutes",
 ]
 
 # Mapping from DataFrame column names to raw DB columns
@@ -33,6 +34,7 @@ _RAW_DF_COLS = [
     "margin_balance", "margin_change", "short_sell", "short_buy",
     "short_balance", "short_change", "short_margin_ratio",
     "foreign_holding_pct", "insti_holding_pct", "limit_up", "limit_down",
+    "is_disposition", "disposition_match_minutes",
 ]
 
 
@@ -322,8 +324,9 @@ def update_prev_day_margin_batch(
     return n_updated
 
 
-# 每列 4 個參數；PostgreSQL 單一語句參數上限 65535，取 1000 列留足餘裕
-_LIMIT_UPDATE_CHUNK = 1000
+# 批次 UPDATE ... FROM (VALUES ...) 的每批列數（漲跌停與處置股共用，兩者都是每列
+# 4 個參數）；PostgreSQL 單一語句參數上限 65535，取 1000 列留足餘裕。
+_BATCH_UPDATE_CHUNK = 1000
 
 
 def update_price_limits_batch(
@@ -349,8 +352,8 @@ def update_price_limits_batch(
     pool = get_pool(database_url)
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            for start in range(0, len(updates), _LIMIT_UPDATE_CHUNK):
-                chunk = updates[start:start + _LIMIT_UPDATE_CHUNK]
+            for start in range(0, len(updates), _BATCH_UPDATE_CHUNK):
+                chunk = updates[start:start + _BATCH_UPDATE_CHUNK]
                 values = ", ".join(
                     ["(%s::varchar, %s::date, %s::numeric, %s::numeric)"] * len(chunk)
                 )
@@ -359,6 +362,49 @@ def update_price_limits_batch(
                     " SET limit_up = v.limit_up, limit_down = v.limit_down"
                     f" FROM (VALUES {values})"
                     " AS v(symbol, trade_date, limit_up, limit_down)"
+                    " WHERE t.symbol = v.symbol AND t.trade_date = v.trade_date"
+                )
+                cur.execute(sql, [x for row in chunk for x in row])
+                n_updated += cur.rowcount
+        conn.commit()
+    return n_updated
+
+
+def update_disposition_batch(
+    database_url: str,
+    updates: list[tuple[str, dt.date, bool, int]],
+) -> int:
+    """批次覆寫 stock_daily_raw 的 is_disposition / disposition_match_minutes。
+
+    只 UPDATE 已存在的 row，不 INSERT：理由同 update_price_limits_batch —— 回補只有
+    這兩欄有值，走 upsert 會 INSERT 出一批其餘欄位全 NULL 的半套 row。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        updates: list of (symbol, trade_date, is_disposition, match_minutes)。
+                 非處置日傳 (False, 0)，不傳 NULL（見 db.py 的欄位註解）。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計（不存在的 (symbol, trade_date) 不算）。
+    """
+    if not updates:
+        return 0
+
+    n_updated = 0
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(updates), _BATCH_UPDATE_CHUNK):
+                chunk = updates[start:start + _BATCH_UPDATE_CHUNK]
+                values = ", ".join(
+                    ["(%s::varchar, %s::date, %s::boolean, %s::smallint)"] * len(chunk)
+                )
+                sql = (
+                    "UPDATE stock_daily_raw AS t"
+                    " SET is_disposition = v.is_disposition,"
+                    "     disposition_match_minutes = v.match_minutes"
+                    f" FROM (VALUES {values})"
+                    " AS v(symbol, trade_date, is_disposition, match_minutes)"
                     " WHERE t.symbol = v.symbol AND t.trade_date = v.trade_date"
                 )
                 cur.execute(sql, [x for row in chunk for x in row])

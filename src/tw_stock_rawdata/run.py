@@ -26,6 +26,7 @@ from .db_utils import (
     load_stock_names,
     load_stock_shares,
     load_symbols_for_date,
+    update_disposition_batch,
     update_prev_day_margin_batch,
     update_price_limits_batch,
     upsert_daily_raw,
@@ -34,6 +35,7 @@ from .db_utils import (
     upsert_stock_shares,
 )
 from .prepare import (
+    prepare_disposition,
     prepare_moneydj_holding_pct,
     prepare_moneydj_margin,
     prepare_tdcc_major_ratio,
@@ -60,9 +62,11 @@ from .sources import (
     fetch_tpex_3insti_v2,
     fetch_tpex_company_basic,
     fetch_tpex_daily_quotes_v2,
+    fetch_tpex_disposition,
     fetch_tpex_margin,
     fetch_tpex_margin_v2,
     fetch_twse_company_basic,
+    fetch_twse_disposition,
     fetch_twse_foreign_net,
     fetch_twse_margin,
     fetch_twse_market_margin,
@@ -352,6 +356,7 @@ def _is_daily_mode(args: argparse.Namespace) -> bool:
         or args.backfill_end
         or args.backfill_stocks
         or args.backfill_limits
+        or args.backfill_disposition
         or args.update_shares
         or args.dahu
     )
@@ -389,6 +394,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backfill-limits", action="store_true",
         help="只回補 limit_up / limit_down（需搭配 --backfill-start / --backfill-end）",
+    )
+    parser.add_argument(
+        "--backfill-disposition", action="store_true",
+        help="只回補 is_disposition / disposition_match_minutes"
+             "（需搭配 --backfill-start / --backfill-end，可選 --backfill-stocks）",
     )
     parser.add_argument(
         "--update-shares", action="store_true",
@@ -482,6 +492,104 @@ def _stock_sources_ok(
     return tpex_insti_ok if is_tpex else twse_insti_ok
 
 
+# 處置公告查詢窗口要往前推的天數。處置期間最長 10 個營業日，公告日又早於期間起日，
+# 只查當日會漏掉「正處在處置期間中段」的個股（公告可能是兩週前發的）。45 個日曆日
+# 足以覆蓋，且端點吃區間查詢，窗口拉長不增加請求數。
+_DISPOSITION_LOOKBACK_DAYS = 45
+
+
+class DispositionData(NamedTuple):
+    """處置名單：展開好的 date -> symbol -> 撮合分鐘數，加上各市場的取得狀態。
+
+    ok_markets 記錄哪些市場的名單確實抓到了。沒抓到的市場不能把該市場個股寫成
+    is_disposition=FALSE —— 那是在宣稱「已確認非處置」，實際上只是沒查到。
+    """
+
+    by_date: dict[dt.date, dict[str, int | None]]
+    ok_markets: frozenset[str]
+
+    def resolve(
+        self,
+        date: dt.date,
+        symbol: str,
+        market_type: str | None,
+    ) -> tuple[bool | None, int | None]:
+        """回傳該檔該日的 (is_disposition, disposition_match_minutes)。
+
+        非處置回 (False, 0) 而非 (False, None)：upsert 的 COALESCE 不以 NULL 覆寫舊值，
+        寫 None 會讓前一段處置留下的分鐘數永遠清不掉（見 db.py 的欄位註解）。
+        名單未取得回 (None, None)，交給 COALESCE 保留 DB 既有值。
+        """
+        day = self.by_date.get(date)
+        if day is not None and symbol in day:
+            minutes = day[symbol]
+            # 撮合頻率解析不到時同樣寫 0 而非 NULL（理由同上）。旁邊有
+            # is_disposition=TRUE，0 不會被誤讀成「非處置」。
+            return True, 0 if minutes is None else minutes
+        if market_type in self.ok_markets:
+            return False, 0
+        # 市場別未知（--backfill-stocks 的個股可能查不到 market_type）時，
+        # 只有兩市場都成功才敢斷言「不在名單內」。
+        if market_type is None and len(self.ok_markets) == 2:
+            return False, 0
+        return None, None
+
+
+def _fetch_disposition(
+    session: requests.Session,
+    start: dt.date,
+    end: dt.date,
+) -> DispositionData:
+    """抓兩市場處置公告並展開成 date -> symbol -> 撮合分鐘數。
+
+    查詢窗口自動往前推 _DISPOSITION_LOOKBACK_DAYS（見常數說明），展開後只保留
+    [start, end] 內的日期。任一市場失敗只影響該市場，不中斷另一邊。
+
+    同一 (symbol, date) 可能對應多筆公告（例如處置期間重疊），取最小分鐘數
+    ＝當日實際生效的最嚴格撮合頻率。
+    """
+    fetch_start = start - dt.timedelta(days=_DISPOSITION_LOOKBACK_DAYS)
+    by_date: dict[dt.date, dict[str, int | None]] = {}
+    ok_markets: set[str] = set()
+
+    for market, fetcher in (
+        ("twse", fetch_twse_disposition),
+        ("tpex", fetch_tpex_disposition),
+    ):
+        try:
+            frame = prepare_disposition(fetcher(session, fetch_start, end))
+        except (DataUnavailableError, requests.RequestException) as exc:
+            print(f"處置股名單（{market}）取得失敗：{exc}")
+            continue
+
+        ok_markets.add(market)
+        for _, row in frame.iterrows():
+            symbol = row["symbol"]
+            minutes = row["match_minutes"]
+            minutes = None if minutes is None or pd.isna(minutes) else int(minutes)
+            day = max(row["start_date"], start)
+            last = min(row["end_date"], end)
+            while day <= last:
+                slot = by_date.setdefault(day, {})
+                if symbol not in slot:
+                    slot[symbol] = minutes
+                elif minutes is not None and (slot[symbol] is None or minutes < slot[symbol]):
+                    slot[symbol] = minutes
+                day += dt.timedelta(days=1)
+
+    if ok_markets:
+        n_days = len(by_date)
+        n_symbols = len({s for day in by_date.values() for s in day})
+        print(
+            f"處置股名單：{'／'.join(sorted(ok_markets))} 取得成功，"
+            f"{start} ~ {end} 內 {n_days} 天 / {n_symbols} 檔標的在處置期間"
+        )
+    else:
+        print("處置股名單：兩市場皆取得失敗，該欄位本次不寫入（保留 DB 既有值）")
+
+    return DispositionData(by_date, frozenset(ok_markets))
+
+
 def _collect_limit_updates(
     session: requests.Session,
     date: dt.date,
@@ -572,6 +680,73 @@ def _backfill_limits_command(
     print(f"漲跌停回補完成，共更新 {total} 列")
 
 
+def _backfill_disposition_command(
+    session: requests.Session,
+    config: AppConfig,
+    args: argparse.Namespace,
+) -> None:
+    """--backfill-disposition：只回補 is_disposition / disposition_match_minutes。
+
+    與 --backfill-limits 的差別是這裡「支援」--backfill-stocks：處置是逐檔註記，
+    限縮到特定股票不會有副作用（漲跌停那邊忽略它是因為那條路徑本來就整批算）。
+    """
+    if args.date:
+        print("警告：--backfill-disposition 已啟用，--date 將被忽略")
+
+    if not args.backfill_start or not args.backfill_end:
+        print("錯誤：--backfill-disposition 需搭配 --backfill-start 和 --backfill-end")
+        return
+
+    dates = _build_date_range(
+        _parse_date(args.backfill_start), _parse_date(args.backfill_end)
+    )
+
+    only_symbols: set[str] | None = None
+    if args.backfill_stocks:
+        only_symbols = {s.strip() for s in args.backfill_stocks.split(",") if s.strip()}
+        if not only_symbols:
+            print("錯誤：--backfill-stocks 未指定任何股票代號")
+            return
+    scope = f"（限 {len(only_symbols)} 檔）" if only_symbols else ""
+    print(f"回補處置股 {len(dates)} 天：{dates[0]} ~ {dates[-1]}{scope}")
+
+    # 端點吃日期區間，整段只查一次公告即可，不必逐日打 API。
+    disposition = _fetch_disposition(session, dates[0], dates[-1])
+    if not disposition.ok_markets:
+        print("錯誤：兩市場處置名單皆取得失敗，不回補")
+        return
+
+    market_types = load_market_types(config.database_url)
+    total = 0
+    for date in dates:
+        if date.weekday() >= 5:
+            continue
+        # 同 --backfill-limits：先問 DB 該日有哪些 symbol，只更新已存在的列。
+        existing = load_symbols_for_date(config.database_url, date)
+        if only_symbols is not None:
+            existing &= only_symbols
+        if not existing:
+            print(f"{date.isoformat()} DB 無該日資料，略過")
+            continue
+
+        updates: list[tuple[str, dt.date, bool, int]] = []
+        for symbol in sorted(existing):
+            flag, minutes = disposition.resolve(date, symbol, market_types.get(symbol))
+            if flag is None:
+                continue
+            updates.append((symbol, date, flag, minutes))
+        if not updates:
+            print(f"{date.isoformat()} 無可回補資料")
+            continue
+
+        n_updated = update_disposition_batch(config.database_url, updates)
+        total += n_updated
+        n_disposed = sum(1 for u in updates if u[2])
+        print(f"{date.isoformat()} 更新 {n_updated} 檔（其中處置中 {n_disposed} 檔）")
+
+    print(f"處置股回補完成，共更新 {total} 列")
+
+
 def _build_daily_rows(
     session: requests.Session,
     date: dt.date,
@@ -590,6 +765,7 @@ def _build_daily_rows(
     name_map: dict[str, str] | None = None,
     twse_insti_ok: bool = True,
     tpex_insti_ok: bool = True,
+    disposition: DispositionData | None = None,
 ) -> pd.DataFrame:
     """Build raw daily rows for stock_daily_raw (no indicators/statistics).
 
@@ -651,6 +827,16 @@ def _build_daily_rows(
         ):
             skipped += 1
             continue
+
+        # 處置註記。市場別用 stocks.market_type（該檔本質屬於哪個市場），
+        # 不用當日 tpex_quotes —— 後者反映的是「今天價格誰供應的」，處置名單
+        # 是否可信取決於該市場的公告有沒有抓到，兩者語意不同。
+        if disposition is None:
+            is_disposition, disposition_match_minutes = None, None
+        else:
+            is_disposition, disposition_match_minutes = disposition.resolve(
+                date, symbol, _row_market_type(item)
+            )
 
         foreign_net, trust_net, dealer_net = _get_institutional_data(
             symbol, twse_3insti, tpex_3insti,
@@ -720,6 +906,8 @@ def _build_daily_rows(
             "insti_holding_pct": holding_pct.get("insti_holding_pct"),
             "limit_up": limit_up,
             "limit_down": limit_down,
+            "is_disposition": is_disposition,
+            "disposition_match_minutes": disposition_match_minutes,
         })
 
     if skipped:
@@ -1092,6 +1280,7 @@ def _run_for_date(
     holding_pct_cache: dict[str, dict[dt.date, dict]] | None = None,
     name_map: dict[str, str] | None = None,
     write_market_daily: bool = True,
+    disposition: DispositionData | None = None,
 ) -> bool:
     """Process data for a single date.
 
@@ -1276,6 +1465,13 @@ def _run_for_date(
                 except (DataUnavailableError, requests.RequestException):
                     pass
 
+    # 處置股名單。backfill 由呼叫端整段預取一次（見 _main_inner），daily / 單日模式
+    # 在此自抓當日窗口，兩市場各一次 HTTP。刻意不納入 _stock_sources_ok：處置只是
+    # 註記欄，抓不到不該讓整檔個股跳過不寫（失敗時該市場寫 NULL，保留既有值）。
+    if disposition is None:
+        with _phase(f"{sheet_name} 處置股名單"):
+            disposition = _fetch_disposition(session, date, date)
+
     # 三大法人來源健康度（已過 twse_confirmed，交易日下「空」＝該來源 fetch 失敗）。
     # 逐檔寫入時用來決定該市場個股是否跳過（融資融券非必要，不納入）。
     twse_insti_ok = not twse_3insti.empty
@@ -1301,6 +1497,7 @@ def _run_for_date(
             name_map=name_map,
             twse_insti_ok=twse_insti_ok,
             tpex_insti_ok=tpex_insti_ok,
+            disposition=disposition,
         )
 
     if output_df.empty:
@@ -1706,6 +1903,11 @@ def _main_inner(
         _backfill_limits_command(session, config, args)
         return
 
+    # --backfill-disposition mode：只回補處置股兩欄
+    if args.backfill_disposition:
+        _backfill_disposition_command(session, config, args)
+        return
+
     # --backfill-stocks mode
     if args.backfill_stocks:
         if not args.backfill_start or not args.backfill_end:
@@ -1741,6 +1943,9 @@ def _main_inner(
         holding_pct_cache = _prefetch_holding_pct_cache(
             session, stocks_holdings, start_date, end_date,
         )
+        # 處置名單整段預取一次（兩市場各 1 次 HTTP），避免每天各打一次。
+        with _phase("預取處置股名單"):
+            disposition = _fetch_disposition(session, start_date, end_date)
 
         sheet_names = set()  # 不需 dedup（force 模式忽略，沒 force 也沒 skip 邏輯）
         any_written = False
@@ -1753,6 +1958,7 @@ def _main_inner(
                 holding_pct_cache=holding_pct_cache,
                 name_map=name_map,
                 write_market_daily=False,
+                disposition=disposition,
             ):
                 any_written = True
         # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ
@@ -1791,6 +1997,9 @@ def _main_inner(
 
         margin_cache = _prefetch_margin_cache(session, holdings, start_date, end_date)
         holding_pct_cache = _prefetch_holding_pct_cache(session, holdings, start_date, end_date)
+        # 處置名單整段預取一次（兩市場各 1 次 HTTP），避免每天各打一次。
+        with _phase("預取處置股名單"):
+            disposition = _fetch_disposition(session, start_date, end_date)
 
         sheet_names = set()
         any_written = False
@@ -1803,6 +2012,7 @@ def _main_inner(
                 margin_cache=margin_cache,
                 holding_pct_cache=holding_pct_cache,
                 name_map=name_map,
+                disposition=disposition,
             ):
                 any_written = True
         # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ

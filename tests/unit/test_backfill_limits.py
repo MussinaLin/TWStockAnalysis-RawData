@@ -103,14 +103,14 @@ class TestUpdatePriceLimitsBatch:
         conn = _FakeConn(cursor)
         monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
 
-        n_rows = db_utils._LIMIT_UPDATE_CHUNK + 500
+        n_rows = db_utils._BATCH_UPDATE_CHUNK + 500
         updates = [
             (f"{i:05d}", DATE, Decimal("11"), Decimal("9")) for i in range(n_rows)
         ]
         db_utils.update_price_limits_batch("postgres://x", updates)
 
         assert len(cursor.executed) == 2
-        assert len(cursor.executed[0][1]) == db_utils._LIMIT_UPDATE_CHUNK * 4
+        assert len(cursor.executed[0][1]) == db_utils._BATCH_UPDATE_CHUNK * 4
         assert len(cursor.executed[1][1]) == 500 * 4
 
     def test_returns_total_rowcount(self, monkeypatch: pytest.MonkeyPatch) -> None:

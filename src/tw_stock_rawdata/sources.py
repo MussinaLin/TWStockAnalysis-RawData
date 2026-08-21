@@ -41,6 +41,12 @@ TWSE_FOREIGN_NET_URL = "https://www.twse.com.tw/fund/BFI82U"
 TWSE_MARKET_MARGIN_URL = "https://www.twse.com.tw/exchangeReport/MI_MARGN"
 TPEX_MARGIN_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
 TPEX_MARGIN_V2_URL = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
+# 處置股公告。兩支都吃日期區間，一次呼叫涵蓋整段（實測半年 314 / 574 筆無截斷）。
+# 刻意不用 OpenAPI 版（openapi.twse.com.tw/v1/announcement/punish、
+# tpex.org.tw/openapi/v1/tpex_disposal_information）：那兩支只回最近幾個公布日的快照，
+# 處置期間最長 10 個營業日、公告日又早於期間起日，用快照會漏掉處置期間中段的個股。
+TWSE_PUNISH_URL = "https://www.twse.com.tw/rwd/zh/announcement/punish"
+TPEX_DISPOSAL_V2_URL = "https://www.tpex.org.tw/www/zh-tw/bulletin/disposal"
 MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
 MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
 TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
@@ -866,6 +872,67 @@ def fetch_tpex_margin_v2(
     data_date = _parse_date_any(str(payload.get("date", "")))
     df = _extract_tpex_v2_table(payload, "上櫃股票")
     return df, data_date
+
+
+@_retry_on_transient
+def fetch_twse_disposition(
+    session: requests.Session,
+    start: dt.date,
+    end: dt.date,
+) -> pd.DataFrame:
+    """Fetch TWSE 公布處置有價證券資訊 for a date range.
+
+    回傳欄位：編號 / 公布日期 / 證券代號 / 證券名稱 / 累計 / 處置條件 /
+    處置起迄時間 / 處置措施 / 處置內容 / 備註。
+
+    此端點會一併回傳「公布日早於 start、但處置期間跨進區間」的公告，
+    所以呼叫端只要把窗口往前推就能涵蓋處置期間中段的個股。
+    """
+    params = {
+        "startDate": start.strftime("%Y%m%d"),
+        "endDate": end.strftime("%Y%m%d"),
+        "response": "json",
+    }
+    response = session.get(TWSE_PUNISH_URL, params=params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+
+    stat = payload.get("stat")
+    if stat not in {None, "ok", "OK"}:
+        raise DataUnavailableError(stat or "TWSE 處置股回傳異常")
+
+    fields = payload.get("fields")
+    data = payload.get("data")
+    if not isinstance(fields, list) or not isinstance(data, list):
+        raise DataUnavailableError("TWSE 處置股回傳格式異常（缺 fields/data）。")
+    return pd.DataFrame(data, columns=fields)
+
+
+@_retry_on_transient
+def fetch_tpex_disposition(
+    session: requests.Session,
+    start: dt.date,
+    end: dt.date,
+) -> pd.DataFrame:
+    """Fetch TPEX 上櫃處置有價證券資訊 for a date range.
+
+    回傳欄位：編號 / 公布日期 / 證券代號 / 證券名稱 / 累計 / 處置起訖時間 /
+    處置原因 / 處置內容 / 收盤價 / 本益比。注意「起訖」與 TWSE 的「起迄」用字不同。
+    """
+    params = {
+        "startDate": start.strftime("%Y/%m/%d"),
+        "endDate": end.strftime("%Y/%m/%d"),
+        "response": "json",
+    }
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    response = session.get(TPEX_DISPOSAL_V2_URL, params=params, timeout=30, verify=False)
+    response.raise_for_status()
+    payload = response.json()
+
+    if payload.get("stat") not in {None, "ok", "OK"}:
+        raise DataUnavailableError(payload.get("stat") or "TPEX 處置股回傳異常")
+
+    return _extract_tpex_v2_table(payload, "上櫃處置有價證券資訊")
 
 
 @_retry_on_transient(

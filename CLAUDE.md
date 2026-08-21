@@ -25,6 +25,7 @@ tw-stock-rawdata --date 2025-10-15    # 指定日
 tw-stock-rawdata --backfill-start 2025-08-01 --backfill-end 2025-10-15
 tw-stock-rawdata --backfill-stocks 2330,2317 --backfill-start ... --backfill-end ...
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force  # 強制覆蓋
+tw-stock-rawdata --backfill-disposition --backfill-start ... --backfill-end ...  # 只回補處置股註記
 tw-stock-rawdata --update-shares      # 只刷新 stocks.issued_shares
 
 # 測試
@@ -47,6 +48,7 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 
 - `stocks` — 個股 master（symbol PK、issued_shares、enabled、alpha_pick_enabled）
 - `stock_daily_raw` — 每日逐檔 raw（PK `(symbol, trade_date)`，**按年 RANGE partition**）
+  含處置股註記 `is_disposition` / `disposition_match_minutes`（語意見 README）
 - `market_daily` — 大盤每日行情（trade_date PK）
 
 ## Gotchas（重要不變量，改動前必讀）
@@ -61,6 +63,17 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
   TWSE / TPEX 暫時性 5xx（如 520）靠 `_retry_on_transient` 吸收。
 - **`--backfill-stocks` 不動 `market_daily`**：逐檔回補只寫 `stock_daily_raw`，避免對
   共用大盤表造成非預期副作用。
+- **處置股欄位的 `0` 是刻意的哨兵值**：`disposition_match_minutes` 在非處置日寫 `0`
+  而非 `NULL`。upsert 的 COALESCE 不以 NULL 覆寫舊值，若非處置寫 NULL，前一段處置
+  留下的分鐘數會永遠清不掉，變成「非處置卻每 20 分鐘撮合」的矛盾列。搭配
+  `is_disposition` 三態讀：TRUE=處置中、FALSE=已確認非處置、NULL=名單沒抓到。
+  「沒抓到」與「已確認非處置」必須分開 —— 只有該市場公告確實取得時才寫 FALSE
+  （見 `DispositionData.resolve`）。處置名單**不可**納入 `_stock_sources_ok`：
+  它只是註記欄，抓不到不該讓整檔個股跳過不寫。
+- **處置公告查詢窗口要往前推 45 天**（`_DISPOSITION_LOOKBACK_DAYS`）：處置期間最長
+  10 個營業日、公告日又早於期間起日，只查當日會漏掉正處在處置期間中段的個股。
+  端點吃區間查詢，窗口拉長不增加請求數。同理**不要**改用 OpenAPI 快照版
+  （`announcement/punish`、`tpex_disposal_information`）—— 那兩支只回最近幾個公布日。
 - **`change` 不可取自 `STOCK_DAY_ALL`**：漲跌價差只從 `MI_INDEX`（上市）與 TPEX
   quotes（上櫃）取。`STOCK_DAY_ALL` 在除權息日給 `Change=0.0000` 且無任何標記，
   而它是 `_fetch_ohlcv_with_fallback` 的第一順位；若讓它供應 change，除權息日會

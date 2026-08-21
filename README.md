@@ -1,6 +1,6 @@
 # TWStockAnalysis-RawData
 
-每日抓取台股 raw data（OHLCV、三大法人、融資融券、發行股數、大盤行情），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
+每日抓取台股 raw data（OHLCV、三大法人、融資融券、發行股數、處置股註記、大盤行情），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
 
 ## 職責邊界
 
@@ -54,6 +54,13 @@ tw-stock-rawdata --backfill-stocks 2330,2317 --backfill-start 2025-08-01 --backf
 # 只回補 limit_up / limit_down（不重打法人、融資融券、持股，比全量回補快很多）
 tw-stock-rawdata --backfill-limits --backfill-start 2025-01-01 --backfill-end 2026-08-12
 
+# 只回補處置股註記（is_disposition / disposition_match_minutes）
+tw-stock-rawdata --backfill-disposition --backfill-start 2025-01-01 --backfill-end 2026-08-12
+
+# 只回補處置股註記，且限定特定股票
+tw-stock-rawdata --backfill-disposition --backfill-stocks 2330,2317 \
+    --backfill-start 2025-01-01 --backfill-end 2026-08-12
+
 # 強制覆蓋既有資料
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force
 
@@ -104,6 +111,39 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 > `NULL`（例如日後排除新上市櫃前五日），因 upsert 採 `COALESCE`、回補對算出
 > `None` 的個股直接跳過，兩條寫入路徑都無法把已寫入的值清成 `NULL`，需手動
 > `UPDATE stock_daily_raw SET limit_up = NULL, limit_down = NULL WHERE ...`。
+
+### 處置股（is_disposition / disposition_match_minutes）
+
+`stock_daily_raw` 的 `is_disposition` 記錄該檔該日是否落在交易所公告的處置期間內，
+`disposition_match_minutes` 記錄處置期間的撮合間隔分鐘數。處置期間改以人工管制撮合
+（不再逐筆連續撮合），會明顯壓抑成交量，下游做量能判斷時應納入。
+
+| `is_disposition` | `disposition_match_minutes` | 意義 |
+|---|---|---|
+| `TRUE`  | `5` / `10` / `20` / `25` / `45` / `60` | 該日在處置期間內，約每 N 分鐘撮合一次 |
+| `TRUE`  | `0` | 在處置期間內，但公告未載明撮合頻率（實測極罕見） |
+| `FALSE` | `0` | 該日已成功取得該市場處置名單，此檔不在名單內 |
+| `NULL`  | `NULL` | 該日名單取得失敗或尚未回補，**下游需容忍** |
+
+- 資料來源：TWSE「公布處置有價證券資訊」（`rwd/zh/announcement/punish`）與
+  TPEX「上櫃處置有價證券資訊」（`www/zh-tw/bulletin/disposal`）。兩支都吃日期區間，
+  daily 模式每天各打 1 次、回補整段只打 1 次。
+- 查詢窗口會自動往前推 45 個日曆日：處置期間最長 10 個營業日、公告日又早於期間起日，
+  只查當日會漏掉「正處在處置期間中段」的個股。
+- 撮合頻率的分級不固定（同樣是「第一次處置」，2026 上半年為每 5 分鐘、8 月起為每 2
+  分鐘），故一律從公告內文解析實際數字，不從「第一次／第二次處置」推導。
+- 非處置日寫 `0` 而不是 `NULL`：upsert 採 `COALESCE`（NULL 不覆寫舊值），
+  若寫 `NULL`，前一段處置留下的分鐘數會永遠清不掉。
+- 兩市場獨立降級：只有 TPEX 抓到時，上市個股該日寫 `NULL`（不寫 `FALSE`）——
+  「沒查到」不等於「已確認非處置」。處置名單不納入逐檔跳過判定，抓不到不會讓個股整檔不寫。
+
+> **已知限制：處置期間邊界**。公告給的是「預定」區間，遇停止買賣、全日暫停交易會順延，
+> 遇有價證券最後交易日則提前結束；交易所沒有提供「當日處置中清單」這種 API，
+> 故邊界日可能有誤差。區間中段一律正確。
+
+歷史資料可用 `--backfill-disposition` 回補，整段只查一次公告，逐日只 `UPDATE`
+已存在的 row（不新增 row）。與 `--backfill-limits` 不同，它**支援** `--backfill-stocks`
+限定股票。兩市場名單皆取得失敗時直接放棄、不寫入。結果冪等，可重複執行，不需 `--force`。
 
 ### OHLCV 來源順序（逐檔請求最小化）
 
