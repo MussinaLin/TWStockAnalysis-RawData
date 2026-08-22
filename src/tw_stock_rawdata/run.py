@@ -55,6 +55,8 @@ from .price_limit import calc_limits
 from .sources import (
     DataUnavailableError,
     build_session,
+    expand_tpex_stock_day,
+    expand_twse_stock_day,
     fetch_moneydj_holding_pct,
     fetch_moneydj_margin,
     fetch_tdcc_distribution,
@@ -65,6 +67,7 @@ from .sources import (
     fetch_tpex_disposition,
     fetch_tpex_margin,
     fetch_tpex_margin_v2,
+    fetch_tpex_stock_day,
     fetch_twse_company_basic,
     fetch_twse_disposition,
     fetch_twse_foreign_net,
@@ -1337,6 +1340,118 @@ def _prefetch_holding_pct_cache(
 
     print(f"法人持股預取完成，共 {len(cache)} 檔股票")
     return cache
+
+
+class SymbolOhlcv(NamedTuple):
+    """單檔在整段區間的 OHLCV 預取結果。
+
+    failed_months 是「判定為限流／取得失敗」的月份（月初日期）。這些月份的日期
+    在 by_date 裡不存在，因此 `_build_daily_rows` 會因為無價格而跳過該檔該日
+    ——與現行「無價格就不寫」的不變量一致，不需要新的 gating 分支。
+    market_type 是定調後的市場別（輸入為 None 時由探測結果填入）。
+    """
+
+    by_date: dict[dt.date, OhlcvResult]
+    market_type: str | None
+    failed_months: list[dt.date]
+
+
+def _month_starts(start: dt.date, end: dt.date) -> list[dt.date]:
+    """回傳涵蓋 [start, end] 的所有月份的月初日期（含頭尾的不完整月）。"""
+    months: list[dt.date] = []
+    cur = start.replace(day=1)
+    last = end.replace(day=1)
+    while cur <= last:
+        months.append(cur)
+        cur = (cur + dt.timedelta(days=32)).replace(day=1)
+    return months
+
+
+def _fetch_month_ohlcv(
+    session: requests.Session,
+    symbol: str,
+    market_type: str,
+    month: dt.date,
+) -> dict[dt.date, OhlcvResult]:
+    """抓單檔單月的月表並展開。該月無資料時拋 DataUnavailableError。"""
+    if market_type == "tpex":
+        raw = fetch_tpex_stock_day(session, symbol, month)
+        expanded = expand_tpex_stock_day(raw)
+    else:
+        raw = fetch_twse_stock_day(session, symbol, month)
+        expanded = expand_twse_stock_day(raw)
+
+    return {
+        date: OhlcvResult(
+            open=vals["open"], close=vals["close"],
+            high=vals["high"], low=vals["low"],
+            volume=vals["volume"], change=vals["change"],
+        )
+        for date, vals in expanded.items()
+    }
+
+
+def _prefetch_symbol_ohlcv(
+    session: requests.Session,
+    symbol: str,
+    market_type: str | None,
+    start: dt.date,
+    end: dt.date,
+    traded_dates: set[dt.date],
+) -> SymbolOhlcv:
+    """逐月抓單檔在 [start, end] 的 OHLCV + change。
+
+    每月 1 發請求，取代原本「每個交易日 4 發全市場批次」的成本結構。
+
+    market_type 為 None（`--backfill-stocks` 直接給代號、DB 查不到市場別）時，
+    用第一個有資料的月份定調：先試 TWSE，回空再試 TPEX，之後整段沿用。
+
+    **限流誤判防護**：`www.twse.com.tw` 被限流時回 HTTP 200 +
+    「很抱歉，沒有符合條件的資料!」，與「該月真的沒資料」是同一個字串，無法從
+    回應本身區分（見 memory/twse-rate-limit-ambiguous-response.md）。這裡用
+    `traded_dates`（該檔在 MoneyDJ zcl 出現過的日期，整段只打一發、不經 TWSE）
+    當外部證據：若 MoneyDJ 證明該月有交易而月表回空，就記進 failed_months 並
+    警告，該月不寫；兩邊都沒有才當成「該檔那個月本來就沒交易」。
+    """
+    by_date: dict[dt.date, OhlcvResult] = {}
+    failed_months: list[dt.date] = []
+    resolved = market_type
+
+    for month in _month_starts(start, end):
+        month_rows: dict[dt.date, OhlcvResult] = {}
+
+        if resolved is None:
+            # 市場別未知：先 TWSE 後 TPEX，以先取得資料者定調。
+            for candidate in ("twse", "tpex"):
+                try:
+                    month_rows = _fetch_month_ohlcv(session, symbol, candidate, month)
+                except (DataUnavailableError, requests.RequestException):
+                    continue
+                if month_rows:
+                    resolved = candidate
+                    break
+        else:
+            try:
+                month_rows = _fetch_month_ohlcv(session, symbol, resolved, month)
+            except (DataUnavailableError, requests.RequestException) as exc:
+                print(f"    {symbol} {month:%Y-%m} 月表取得失敗：{exc}")
+
+        if month_rows:
+            by_date.update(month_rows)
+            continue
+
+        # 月表沒給東西 —— 是「沒交易」還是「被限流」？用 MoneyDJ 當外部證據。
+        month_end = (month + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
+        if any(month <= d <= month_end for d in traded_dates):
+            failed_months.append(month)
+            print(
+                f"    ⚠ {symbol} {month:%Y-%m} 月表回空，但 MoneyDJ 顯示該月有交易"
+                "：判定為限流／取得失敗，該月不寫入（請稍後重跑此區間）"
+            )
+
+    return SymbolOhlcv(
+        by_date=by_date, market_type=resolved, failed_months=failed_months
+    )
 
 
 def _run_for_date(
