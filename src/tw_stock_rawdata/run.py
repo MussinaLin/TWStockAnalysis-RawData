@@ -37,6 +37,7 @@ from .db_utils import (
 from .prepare import (
     prepare_disposition,
     prepare_moneydj_holding_pct,
+    prepare_moneydj_insti,
     prepare_moneydj_margin,
     prepare_tdcc_major_ratio,
     prepare_tdcc_retail_ratio,
@@ -840,6 +841,140 @@ class BatchSourceProvider:
         用途不同，見 `_build_daily_rows` docstring）。
         """
         return symbol in self._tpex_symbols
+
+
+class PerSymbolRangeProvider:
+    """per-stock 區間來源的 provider（`--backfill-stocks` 用）。
+
+    建構時把整段區間的資料一次抓完，之後全部是記憶體查表、零 HTTP：
+    - OHLCV + change：逐月抓 TWSE STOCK_DAY / TPEX 個股月表（每檔每月 1 發）
+    - 三大法人：MoneyDJ zcl，**整段只打 1 發**（該頁同時含持股比重，
+      所以三大法人是零額外請求）
+
+    單位契約與 BatchSourceProvider 相同：`ohlcv().volume` 與 `insti()` 一律回「股」。
+    per-symbol 來源給的是「張」，已在 `expand_tpex_stock_day` /
+    `prepare_moneydj_insti` 內 × 1000 還原。
+    """
+
+    def __init__(
+        self,
+        *,
+        ohlcv_by_symbol: dict[str, dict[dt.date, OhlcvResult]],
+        insti_by_symbol: dict[str, dict[dt.date, tuple[int | None, int | None, int | None]]],
+        insti_ok_by_symbol: dict[str, bool],
+        resolved_market_types: dict[str, str],
+    ) -> None:
+        self._ohlcv = ohlcv_by_symbol
+        self._insti = insti_by_symbol
+        self._insti_ok = insti_ok_by_symbol
+        self.resolved_market_types = resolved_market_types
+
+    @classmethod
+    def build(
+        cls,
+        session: requests.Session,
+        symbols: list[str],
+        market_types: dict[str, str],
+        start: dt.date,
+        end: dt.date,
+    ) -> PerSymbolRangeProvider:
+        """對每檔預取整段的 OHLCV 與三大法人。
+
+        先抓 MoneyDJ（整段 1 發），再用它產出的日期集合當「該檔哪些日子有交易」的
+        外部證據，交給 `_prefetch_symbol_ohlcv` 區分「月表回空」是沒交易還是被限流。
+        順序不可對調。
+        """
+        ohlcv_by_symbol: dict[str, dict[dt.date, OhlcvResult]] = {}
+        insti_by_symbol: dict[str, dict[dt.date, tuple]] = {}
+        insti_ok_by_symbol: dict[str, bool] = {}
+        resolved: dict[str, str] = {}
+
+        total = len(symbols)
+        for idx, symbol in enumerate(symbols, start=1):
+            print(f"  預取個股區間資料 {idx}/{total} {symbol}")
+
+            # 1) MoneyDJ zcl：三大法人（整段 1 發，與持股比重同一頁）
+            insti_map: dict[dt.date, tuple] = {}
+            insti_ok = False
+            try:
+                raw = fetch_moneydj_holding_pct(session, symbol, start, end)
+                insti_df = prepare_moneydj_insti(raw)
+                for _, row in insti_df.iterrows():
+                    row_date = row["date"]
+                    if not isinstance(row_date, dt.date):
+                        continue
+                    insti_map[row_date] = (
+                        row.get("foreign_net"),
+                        row.get("trust_net"),
+                        row.get("dealer_net"),
+                    )
+                insti_ok = True
+            except (DataUnavailableError, requests.RequestException) as exc:
+                print(f"    {symbol} MoneyDJ 三大法人取得失敗：{exc}")
+
+            insti_by_symbol[symbol] = insti_map
+            insti_ok_by_symbol[symbol] = insti_ok
+
+            # 2) 月表：OHLCV + change（每月 1 發），用 MoneyDJ 日期當限流判準
+            fetched = _prefetch_symbol_ohlcv(
+                session=session,
+                symbol=symbol,
+                market_type=market_types.get(symbol),
+                start=start,
+                end=end,
+                traded_dates=set(insti_map),
+            )
+            ohlcv_by_symbol[symbol] = fetched.by_date
+            if fetched.market_type is not None:
+                resolved[symbol] = fetched.market_type
+            if fetched.failed_months:
+                months = "、".join(f"{m:%Y-%m}" for m in fetched.failed_months)
+                print(f"    ⚠ {symbol} 以下月份判定為取得失敗、未寫入：{months}")
+
+        return cls(
+            ohlcv_by_symbol=ohlcv_by_symbol,
+            insti_by_symbol=insti_by_symbol,
+            insti_ok_by_symbol=insti_ok_by_symbol,
+            resolved_market_types=resolved,
+        )
+
+    def ohlcv(
+        self, symbol: str, date: dt.date, market_type: str | None
+    ) -> OhlcvResult:
+        found = self._ohlcv.get(symbol, {}).get(date)
+        if found is not None:
+            return found
+        # 該日不在月表（沒交易 / 停牌 / 該月判定取得失敗）→ 全 None，
+        # `_build_daily_rows` 會因為無價格而跳過該檔該日。
+        return OhlcvResult(
+            open=None, close=None, high=None, low=None, volume=None, change=None
+        )
+
+    def insti(
+        self, symbol: str, date: dt.date
+    ) -> tuple[int | None, int | None, int | None]:
+        """回傳該檔該日的三大法人買賣超（股）。
+
+        與 BatchSourceProvider.insti 不同，這裡**確實**鍵在 date 上 —— per-symbol
+        來源一次持有整段區間的資料，date 是查表用的必要參數，不是形式參數。
+        """
+        return self._insti.get(symbol, {}).get(date, (None, None, None))
+
+    def insti_ok(self, symbol: str, market_type: str | None) -> bool:
+        """該檔的 MoneyDJ 是否取得成功。
+
+        整段失敗時該檔**每一天**都不通過 gating，等同整檔跳過不寫——與現行
+        「逐檔跳過半套資料」的不變量一致，留待重跑補上。
+        """
+        return self._insti_ok.get(symbol, False)
+
+    def is_tpex(self, symbol: str, market_type: str | None) -> bool:
+        """per-stock 模式下市場別是已知事實，直接用 stocks.market_type。
+
+        不需要 batch 模式那個「靠當日 tpex_quotes 推市場別」的 workaround。
+        """
+        resolved = self.resolved_market_types.get(symbol) or market_type
+        return resolved == "tpex"
 
 
 def _build_daily_rows(
