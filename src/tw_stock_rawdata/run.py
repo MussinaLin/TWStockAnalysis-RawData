@@ -1604,12 +1604,18 @@ def _run_for_date(
     name_map: dict[str, str] | None = None,
     write_market_daily: bool = True,
     disposition: DispositionData | None = None,
+    provider: RowSourceProvider | None = None,
 ) -> bool:
     """Process data for a single date.
 
     write_market_daily: 是否寫入全市場大盤資料 (market_daily)。market_daily 以
     trade_date 為鍵、與個股無關；--backfill-stocks（特定股票回補）會傳 False，
     避免對共用的大盤表產生非預期副作用。一般日期範圍回補與 daily 模式維持 True。
+
+    provider: 已預取好的來源。傳入時**完全跳過所有全市場批次 HTTP**
+    （T86 / MI_INDEX / TPEX quotes / TPEX 3insti）以及 twse_confirmed 判斷，
+    直接用它組列——`--backfill-stocks` 走這條路，交易日由 provider 的月表資料
+    決定（該日無價格就不寫該檔）。不傳時維持現行行為。
     """
     sheet_name = date.isoformat()
     print(f"開始處理日期 {sheet_name}")
@@ -1623,6 +1629,37 @@ def _run_for_date(
     if skip_existing and sheet_name in sheet_names:
         print(f"已存在 {sheet_name}，略過回補。")
         return False
+
+    # per-stock 模式：來源已整段預取完畢，跳過所有全市場批次 HTTP。
+    # 交易日不再靠 twse_confirmed 判定 —— 該檔該日有沒有交易由月表資料決定
+    # （provider.ohlcv 回全 None → _build_daily_rows 因無價格跳過該列）。
+    if provider is not None:
+        if disposition is None:
+            with _phase(f"{sheet_name} 處置股名單"):
+                disposition = _fetch_disposition(session, date, date)
+
+        with _phase(f"{sheet_name} 逐檔組列（{len(holdings)} 檔）"):
+            output_df = _build_daily_rows(
+                date=date,
+                holdings=holdings,
+                provider=provider,
+                issued_shares=issued_shares,
+                margin_cache=margin_cache,
+                holding_pct_cache=holding_pct_cache,
+                name_map=name_map,
+                disposition=disposition,
+            )
+
+        if output_df.empty or output_df["close"].isna().all():
+            print(f"{sheet_name} 無可寫入資料（該日無交易或來源取得失敗）。")
+            return False
+
+        sheet_names.add(sheet_name)
+        with _phase(f"{sheet_name} 寫入 stock_daily_raw（{len(output_df)} 列）"):
+            upsert_daily_raw(config.database_url, date, output_df)
+
+        # market_daily 與個股無關，per-stock 回補不動它（維持既有不變量）。
+        return True
 
     # Fetch TWSE 3-institutional data
     try:
@@ -2248,12 +2285,8 @@ def _main_inner(
             print("錯誤：--backfill-stocks 未指定任何股票代號")
             return
 
-        # 市場別查 DB（CLI 只給代號）；查不到的留 None，退回既有 fallback 行為。
+        # 市場別查 DB（CLI 只給代號）；查不到的留 None，由 provider 探測定調。
         market_types = load_market_types(db_url)
-        stocks_holdings = pd.DataFrame([
-            {"symbol": s, "name": "", "market_type": market_types.get(s)}
-            for s in stock_list
-        ])
         start_date = _parse_date(args.backfill_start)
         end_date = _parse_date(args.backfill_end)
         backfill_dates = _build_date_range(start_date, end_date)
@@ -2266,15 +2299,45 @@ def _main_inner(
         issued_shares = _get_issued_shares(session, config)
         print("載入股票名稱...")
         name_map = load_stock_names(db_url)
+        # per-stock 分支不打 STOCK_DAY 逐檔月表快取，但 _run_for_date 簽名仍要求
+        # 這個位置參數；provider 分支內部不會用到它。
         twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame] = {}
 
-        margin_cache = _prefetch_margin_cache(session, stocks_holdings, start_date, end_date)
+        margin_holdings = pd.DataFrame([
+            {"symbol": s, "name": "", "market_type": market_types.get(s)}
+            for s in stock_list
+        ])
+        margin_cache = _prefetch_margin_cache(
+            session, margin_holdings, start_date, end_date
+        )
         holding_pct_cache = _prefetch_holding_pct_cache(
-            session, stocks_holdings, start_date, end_date,
+            session, margin_holdings, start_date, end_date,
         )
         # 處置名單整段預取一次（兩市場各 1 次 HTTP），避免每天各打一次。
         with _phase("預取處置股名單"):
             disposition = _fetch_disposition(session, start_date, end_date)
+
+        # per-stock 區間來源：OHLCV 每檔每月 1 發、三大法人每檔整段 1 發。
+        # 取代原本「每個交易日 4 發全市場批次」的成本結構。
+        with _phase("預取個股區間 OHLCV／三大法人"):
+            provider = PerSymbolRangeProvider.build(
+                session=session,
+                symbols=stock_list,
+                market_types=market_types,
+                start=start_date,
+                end=end_date,
+            )
+
+        # 用探測定調後的市場別組 holdings，讓處置註記與 gating 拿到正確市場別。
+        stocks_holdings = pd.DataFrame([
+            {
+                "symbol": s,
+                "name": name_map.get(s, ""),
+                "market_type": provider.resolved_market_types.get(s)
+                or market_types.get(s),
+            }
+            for s in stock_list
+        ])
 
         sheet_names = set()  # 不需 dedup（force 模式忽略，沒 force 也沒 skip 邏輯）
         any_written = False
@@ -2288,6 +2351,7 @@ def _main_inner(
                 name_map=name_map,
                 write_market_daily=False,
                 disposition=disposition,
+                provider=provider,
             ):
                 any_written = True
         # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ

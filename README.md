@@ -145,6 +145,27 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 已存在的 row（不新增 row）。與 `--backfill-limits` 不同，它**支援** `--backfill-stocks`
 限定股票。兩市場名單皆取得失敗時直接放棄、不寫入。結果冪等，可重複執行，不需 `--force`。
 
+### 回補特定股票（--backfill-stocks）
+
+`--backfill-stocks` 走 **per-stock 區間抓取**，與其他回補模式的成本結構不同：
+
+- OHLCV + 漲跌價差：每檔**每月 1 次**請求（上市走 TWSE `STOCK_DAY`、
+  上櫃走 TPEX 個股月表 `afterTrading/tradingStock`）
+- 三大法人：每檔**整段 1 次**請求（MoneyDJ `zcl`，與外資/法人持股佔比同一頁，
+  故為零額外請求）
+- 融資融券：每檔整段 1 次（MoneyDJ）
+- 處置股名單：整段兩市場各 1 次
+
+回補 1 檔 3 年約 **40 次請求**（一般日期區間回補是每個交易日 4 次全市場批次，
+同樣範圍約 2,900 次），因此**不需要**分段執行或段間 sleep。
+
+已知差異（設計時確認接受）：
+- 三大法人與上櫃成交量來自「張」為單位的來源，與交易所股數經 `// 1000` 的結果
+  最多差 1 張。
+- 上櫃股**除權息日**的漲跌價差，此模式取得的是正確值（daily 模式的來源只給
+  文字標記，寫 NULL）。搭配 upsert 的 `COALESCE`，回補過的日子資料較完整。
+- `--backfill-stocks` 仍**不寫** `market_daily`。
+
 ### OHLCV 來源順序（逐檔請求最小化）
 
 `_fetch_ohlcv_with_fallback` 的 fallback 鏈是：
