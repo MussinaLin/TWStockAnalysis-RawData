@@ -830,6 +830,49 @@ def prepare_moneydj_holding_pct(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def prepare_moneydj_insti(df: pd.DataFrame) -> pd.DataFrame:
+    """把 MoneyDJ zcl 的三大法人買賣超整理成標準格式。
+
+    輸入來自 `fetch_moneydj_holding_pct`（同一份 HTML、同一次請求）：
+    date / foreign_net_lots / trust_net_lots / dealer_net_lots。
+
+    輸出 date（`dt.date`）+ foreign_net / trust_net / dealer_net，**單位為股**
+    （張 × 1000），以符合 `RowSourceProvider.insti()` 的契約。
+
+    MoneyDJ 的張數是四捨五入的，交易所 T86 的股數則會在 `_build_daily_rows` 被
+    `// 1000` 無條件捨去，兩者最多差 1 張。實測 2330 / 2025-07-31：
+    外資 T86 9,039,647 → 9039 張，MoneyDJ 9040 張。此誤差已於設計階段確認接受。
+
+    MoneyDJ 的「外資」對應 T86 的「外陸資買賣超股數(不含外資自營商)」。實測
+    2025-07-31 全市場 14,186 檔的「外資自營商」欄全為 0，兩種定義實務上等價。
+    """
+    if "date" not in df.columns:
+        raise DataUnavailableError("MoneyDJ 三大法人欄位解析失敗，缺少 date")
+
+    result = pd.DataFrame()
+    result["date"] = df["date"].map(
+        lambda v: None if pd.isna(v) else _parse_roc_date(str(v).strip())
+    )
+
+    def _lots_to_shares(val):
+        lots = _clean_int(val)
+        return None if lots is None else lots * 1000
+
+    for out_col, in_col in [
+        ("foreign_net", "foreign_net_lots"),
+        ("trust_net", "trust_net_lots"),
+        ("dealer_net", "dealer_net_lots"),
+    ]:
+        if in_col in df.columns:
+            result[out_col] = df[in_col].map(_lots_to_shares)
+        else:
+            result[out_col] = None
+
+    result = result.dropna(subset=["date"])
+
+    return result
+
+
 # 大戶門檻：400 張 = 400,000 股。TDCC 分級在 400,000/400,001 之間切開，
 # 故「400 張以上」= 分級下界 >= 400,001 的所有級距（400,001-600,000 起算）。
 _MAJOR_HOLDER_MIN_SHARES = 400_001

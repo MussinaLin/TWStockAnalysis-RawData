@@ -1184,7 +1184,8 @@ def fetch_moneydj_holding_pct(
         end: End date
 
     Returns:
-        DataFrame with columns: date, foreign_holding_pct, insti_holding_pct
+        DataFrame with columns: date, foreign_net_lots, trust_net_lots,
+        dealer_net_lots (買賣超，單位張), foreign_holding_pct, insti_holding_pct
         (percentage strings like "35.03%")
     """
     start_str = f"{start.year}-{start.month}-{start.day}"
@@ -1234,10 +1235,19 @@ def fetch_moneydj_holding_pct(
     if data_rows.empty:
         raise DataUnavailableError("MoneyDJ 法人持股無有效資料")
 
-    # Column mapping (0-indexed):
-    # 0: 日期, 9: 外資持股比重, 10: 三大法人持股比重
+    # MoneyDJ zcl 欄位對映（0-indexed）：
+    #   0     日期
+    #   1-4   買賣超：外資 / 投信 / 自營商 / 單日合計（單位：張）
+    #   5-8   估計持股：外資 / 投信 / 自營商 / 單日合計
+    #   9-10  持股比重：外資 / 三大法人
+    # 三大法人買賣超與持股比重在**同一頁**，所以取三大法人不需要額外 HTTP 請求。
+    # 這裡只做欄位切出，型別轉換留給 prepare_moneydj_holding_pct /
+    # prepare_moneydj_insti，維持 fetch 層只負責取得與定位的分工。
     result = pd.DataFrame()
     result["date"] = data_rows.iloc[:, 0].values
+    result["foreign_net_lots"] = data_rows.iloc[:, 1].values
+    result["trust_net_lots"] = data_rows.iloc[:, 2].values
+    result["dealer_net_lots"] = data_rows.iloc[:, 3].values
     result["foreign_holding_pct"] = data_rows.iloc[:, 9].values
     result["insti_holding_pct"] = data_rows.iloc[:, 10].values
 
