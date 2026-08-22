@@ -147,12 +147,15 @@ def test_build_daily_rows_passes_market_type_through(stock_day_spy) -> None:
     )
 
     run._build_daily_rows(
-        session=None, date=DATE, holdings=holdings,
-        twse_3insti=insti,
-        twse_day_all=None, twse_mi_index=None,
-        tpex_quotes=_empty_quotes(),
-        tpex_3insti=insti,
-        twse_month_cache={},
+        date=DATE, holdings=holdings,
+        provider=run.BatchSourceProvider(
+            session=None,
+            twse_3insti=insti,
+            twse_day_all=None, twse_mi_index=None,
+            tpex_quotes=_empty_quotes(),
+            tpex_3insti=insti,
+            twse_month_cache={},
+        ),
     )
 
     assert stock_day_spy == ["2330"]
@@ -164,12 +167,15 @@ def test_build_daily_rows_without_market_type_column(stock_day_spy) -> None:
     insti = pd.DataFrame(columns=["symbol", "foreign_net", "trust_net", "dealer_net"])
 
     run._build_daily_rows(
-        session=None, date=DATE, holdings=holdings,
-        twse_3insti=insti,
-        twse_day_all=None, twse_mi_index=None,
-        tpex_quotes=_empty_quotes(),
-        tpex_3insti=insti,
-        twse_month_cache={},
+        date=DATE, holdings=holdings,
+        provider=run.BatchSourceProvider(
+            session=None,
+            twse_3insti=insti,
+            twse_day_all=None, twse_mi_index=None,
+            tpex_quotes=_empty_quotes(),
+            tpex_3insti=insti,
+            twse_month_cache={},
+        ),
     )
 
     assert stock_day_spy == ["2330"]

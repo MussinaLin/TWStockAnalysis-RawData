@@ -7,7 +7,7 @@ import contextlib
 import datetime as dt
 import time
 from decimal import Decimal
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -747,24 +747,109 @@ def _backfill_disposition_command(
     print(f"處置股回補完成，共更新 {total} 列")
 
 
+class RowSourceProvider(Protocol):
+    """`_build_daily_rows` 取得「該檔該日」原始資料的唯一管道。
+
+    有兩種實作，差別只在資料從哪來，組列邏輯共用同一條路徑（不產生雙軌）：
+    - `BatchSourceProvider`：全市場批次來源（daily / 全市場 backfill）
+    - `PerSymbolRangeProvider`：per-stock 區間來源（`--backfill-stocks`）
+
+    **單位契約：`ohlcv().volume` 與 `insti()` 回傳的三個值一律是「股」。**
+    per-symbol 來源拿到的是「張」，一律在 provider 內 × 1000 還原，讓
+    `_build_daily_rows` 尾端的 `// 1000` 不需要任何 per-mode 分支。
+    """
+
+    def ohlcv(
+        self, symbol: str, date: dt.date, market_type: str | None
+    ) -> OhlcvResult: ...
+
+    def insti(
+        self, symbol: str, date: dt.date
+    ) -> tuple[int | None, int | None, int | None]: ...
+
+    def insti_ok(self, symbol: str, market_type: str | None) -> bool: ...
+
+    def is_tpex(self, symbol: str, market_type: str | None) -> bool: ...
+
+
+class BatchSourceProvider:
+    """全市場批次來源的 provider（daily / 全市場 backfill 用）。
+
+    純委派給既有的自由函式，**零行為變更**。自由函式刻意保留在模組層級，
+    既有的 `test_run_ohlcv_source_order` / `test_run_stock_sources` 因此不需改動。
+    """
+
+    def __init__(
+        self,
+        *,
+        session: requests.Session | None,
+        twse_3insti: pd.DataFrame,
+        twse_day_all: pd.DataFrame | None,
+        twse_mi_index: pd.DataFrame | None,
+        tpex_quotes: pd.DataFrame,
+        tpex_3insti: pd.DataFrame,
+        twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame],
+        twse_insti_ok: bool = True,
+        tpex_insti_ok: bool = True,
+    ) -> None:
+        self._session = session
+        self._twse_3insti = twse_3insti
+        self._twse_day_all = twse_day_all
+        self._twse_mi_index = twse_mi_index
+        self._tpex_quotes = tpex_quotes
+        self._tpex_3insti = tpex_3insti
+        self._twse_month_cache = twse_month_cache
+        self._twse_insti_ok = twse_insti_ok
+        self._tpex_insti_ok = tpex_insti_ok
+
+        if not tpex_quotes.empty and "symbol" in tpex_quotes.columns:
+            self._tpex_symbols = set(tpex_quotes["symbol"].astype(str).str.strip())
+        else:
+            self._tpex_symbols = set()
+
+    def ohlcv(
+        self, symbol: str, date: dt.date, market_type: str | None
+    ) -> OhlcvResult:
+        return _fetch_ohlcv_with_fallback(
+            self._session, date, symbol,
+            self._twse_day_all, self._twse_mi_index,
+            self._tpex_quotes, self._twse_month_cache,
+            market_type=market_type,
+        )
+
+    def insti(
+        self, symbol: str, date: dt.date
+    ) -> tuple[int | None, int | None, int | None]:
+        return _get_institutional_data(symbol, self._twse_3insti, self._tpex_3insti)
+
+    def insti_ok(self, symbol: str, market_type: str | None) -> bool:
+        return _stock_sources_ok(
+            is_tpex=self.is_tpex(symbol, market_type),
+            twse_insti_ok=self._twse_insti_ok,
+            tpex_insti_ok=self._tpex_insti_ok,
+        )
+
+    def is_tpex(self, symbol: str, market_type: str | None) -> bool:
+        """batch 模式用「該檔今天有沒有出現在 tpex_quotes」判定。
+
+        這反映的是「這檔今天的價格是誰供應的」，必須跟著當日實際來源走，
+        刻意**不**用 `stocks.market_type`（那反映的是「本質上屬於哪個市場」，
+        用途不同，見 `_build_daily_rows` docstring）。
+        """
+        return symbol in self._tpex_symbols
+
+
 def _build_daily_rows(
-    session: requests.Session,
+    *,
     date: dt.date,
     holdings: pd.DataFrame,
-    twse_3insti: pd.DataFrame,
-    twse_day_all: pd.DataFrame | None,
-    twse_mi_index: pd.DataFrame | None,
-    tpex_quotes: pd.DataFrame,
-    tpex_3insti: pd.DataFrame,
-    twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame],
+    provider: RowSourceProvider,
     issued_shares: dict[str, int] | None = None,
     twse_margin: pd.DataFrame | None = None,
     tpex_margin: pd.DataFrame | None = None,
     margin_cache: dict[str, dict[dt.date, dict]] | None = None,
     holding_pct_cache: dict[str, dict[dt.date, dict]] | None = None,
     name_map: dict[str, str] | None = None,
-    twse_insti_ok: bool = True,
-    tpex_insti_ok: bool = True,
     disposition: DispositionData | None = None,
 ) -> pd.DataFrame:
     """Build raw daily rows for stock_daily_raw (no indicators/statistics).
@@ -775,11 +860,13 @@ def _build_daily_rows(
     跳過的個股留待重跑 / backfill 補上（搭配 upsert 的 COALESCE）。
 
     市場別有兩個獨立訊號，用途不同、不要互相取代：
-    - 條件 2 的 gating 用「該檔是否出現在當日 tpex_quotes」判定，反映的是
-      「這檔今天的價格是誰供應的」，必須跟著當日實際來源走。
-    - OHLCV fallback 用 holdings 的 `stocks.market_type`（見 _fetch_ohlcv_with_fallback），
-      反映的是「這檔本質上屬於哪個市場」，不能依賴當日 tpex_quotes 是否抓成功
-      —— 否則 TPEX 整批失敗時，上櫃股又會退回去打註定沒資料的 TWSE 月表。
+    - gating 用 `provider.is_tpex()`。batch provider 以「該檔是否出現在當日
+      tpex_quotes」回答，反映「這檔今天的價格是誰供應的」；per-symbol provider
+      直接回答 stocks.market_type，因為那個模式下市場別是已知事實。
+    - OHLCV fallback 用 holdings 的 `stocks.market_type`（見
+      `_fetch_ohlcv_with_fallback`），反映「這檔本質上屬於哪個市場」，不能依賴
+      當日 tpex_quotes 是否抓成功 —— 否則 TPEX 整批失敗時，上櫃股又會退回去打
+      註定沒資料的 TWSE 月表。
     """
     rows: list[dict] = []
     total = len(holdings)
@@ -787,22 +874,15 @@ def _build_daily_rows(
     if name_map is None:
         name_map = {}
 
-    if not tpex_quotes.empty and "symbol" in tpex_quotes.columns:
-        tpex_symbols = set(tpex_quotes["symbol"].astype(str).str.strip())
-    else:
-        tpex_symbols = set()
-
     for idx, item in holdings.iterrows():
         symbol = str(item["symbol"]).strip()
         name = name_map.get(symbol, "")
         display_name = f" {name}" if name else ""
         print(f"{date.isoformat()} {idx + 1}/{total} {symbol}{display_name}")
 
-        ohlcv = _fetch_ohlcv_with_fallback(
-            session, date, symbol, twse_day_all, twse_mi_index,
-            tpex_quotes, twse_month_cache,
-            market_type=_row_market_type(item),
-        )
+        market_type = _row_market_type(item)
+
+        ohlcv = provider.ohlcv(symbol, date, market_type)
         open_price = ohlcv.open
         close_price = ohlcv.close
         high_price = ohlcv.high
@@ -819,12 +899,7 @@ def _build_daily_rows(
             continue
 
         # 逐檔跳過 2：該檔市場別的三大法人來源失敗（融資融券例外，不 gating）
-        is_tpex = symbol in tpex_symbols
-        if not _stock_sources_ok(
-            is_tpex=is_tpex,
-            twse_insti_ok=twse_insti_ok,
-            tpex_insti_ok=tpex_insti_ok,
-        ):
+        if not provider.insti_ok(symbol, market_type):
             skipped += 1
             continue
 
@@ -835,12 +910,10 @@ def _build_daily_rows(
             is_disposition, disposition_match_minutes = None, None
         else:
             is_disposition, disposition_match_minutes = disposition.resolve(
-                date, symbol, _row_market_type(item)
+                date, symbol, market_type
             )
 
-        foreign_net, trust_net, dealer_net = _get_institutional_data(
-            symbol, twse_3insti, tpex_3insti,
-        )
+        foreign_net, trust_net, dealer_net = provider.insti(symbol, date)
 
         if margin_cache is not None and symbol in margin_cache and date in margin_cache[symbol]:
             margin_data = margin_cache[symbol][date]
@@ -1479,24 +1552,27 @@ def _run_for_date(
 
     # Build daily data
     with _phase(f"{sheet_name} 逐檔組列（{len(holdings)} 檔）"):
-        output_df = _build_daily_rows(
+        provider = BatchSourceProvider(
             session=session,
-            date=date,
-            holdings=holdings,
             twse_3insti=twse_3insti,
             twse_day_all=twse_day_all,
             twse_mi_index=twse_mi_index,
             tpex_quotes=tpex_quotes,
             tpex_3insti=tpex_3insti,
             twse_month_cache=twse_month_cache,
+            twse_insti_ok=twse_insti_ok,
+            tpex_insti_ok=tpex_insti_ok,
+        )
+        output_df = _build_daily_rows(
+            date=date,
+            holdings=holdings,
+            provider=provider,
             issued_shares=issued_shares,
             twse_margin=twse_margin,
             tpex_margin=tpex_margin,
             margin_cache=margin_cache,
             holding_pct_cache=holding_pct_cache,
             name_map=name_map,
-            twse_insti_ok=twse_insti_ok,
-            tpex_insti_ok=tpex_insti_ok,
             disposition=disposition,
         )
 
@@ -1810,24 +1886,27 @@ def _run_for_date_no_write(
     twse_insti_ok = not twse_3insti.empty
     tpex_insti_ok = not tpex_3insti.empty
 
-    output_df = _build_daily_rows(
+    provider = BatchSourceProvider(
         session=session,
-        date=date,
-        holdings=holdings,
         twse_3insti=twse_3insti,
         twse_day_all=twse_day_all,
         twse_mi_index=twse_mi_index,
         tpex_quotes=tpex_quotes,
         tpex_3insti=tpex_3insti,
         twse_month_cache=twse_month_cache,
+        twse_insti_ok=twse_insti_ok,
+        tpex_insti_ok=tpex_insti_ok,
+    )
+    output_df = _build_daily_rows(
+        date=date,
+        holdings=holdings,
+        provider=provider,
         issued_shares=issued_shares,
         twse_margin=twse_margin,
         tpex_margin=tpex_margin,
         margin_cache=margin_cache,
         holding_pct_cache=holding_pct_cache,
         name_map=name_map,
-        twse_insti_ok=twse_insti_ok,
-        tpex_insti_ok=tpex_insti_ok,
     )
 
     if output_df.empty:

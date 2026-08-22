@@ -343,15 +343,17 @@ def test_build_daily_rows_places_disposition_correctly() -> None:
     disposition = run.DispositionData({DATE: {"2330": 20}}, frozenset({"twse"}))
 
     result = run._build_daily_rows(
-        session=None,
         date=DATE,
         holdings=holdings,
-        twse_3insti=_EMPTY_WITH_SYMBOL,
-        twse_day_all=twse_day_all,
-        twse_mi_index=None,
-        tpex_quotes=_EMPTY_TPEX_QUOTES,
-        tpex_3insti=_EMPTY_WITH_SYMBOL,
-        twse_month_cache={},
+        provider=run.BatchSourceProvider(
+            session=None,
+            twse_3insti=_EMPTY_WITH_SYMBOL,
+            twse_day_all=twse_day_all,
+            twse_mi_index=None,
+            tpex_quotes=_EMPTY_TPEX_QUOTES,
+            tpex_3insti=_EMPTY_WITH_SYMBOL,
+            twse_month_cache={},
+        ),
         disposition=disposition,
     )
 
@@ -382,15 +384,17 @@ def test_build_daily_rows_without_disposition_writes_none() -> None:
     """沒帶處置資料時兩欄一律 None，交給 upsert 的 COALESCE 保留 DB 既有值。"""
     holdings = pd.DataFrame([{"symbol": "2330", "market_type": "twse"}])
     result = run._build_daily_rows(
-        session=None,
         date=DATE,
         holdings=holdings,
-        twse_3insti=_EMPTY_WITH_SYMBOL,
-        twse_day_all=pd.DataFrame([_day_all_row("2330", 2435.0)]),
-        twse_mi_index=None,
-        tpex_quotes=_EMPTY_TPEX_QUOTES,
-        tpex_3insti=_EMPTY_WITH_SYMBOL,
-        twse_month_cache={},
+        provider=run.BatchSourceProvider(
+            session=None,
+            twse_3insti=_EMPTY_WITH_SYMBOL,
+            twse_day_all=pd.DataFrame([_day_all_row("2330", 2435.0)]),
+            twse_mi_index=None,
+            tpex_quotes=_EMPTY_TPEX_QUOTES,
+            tpex_3insti=_EMPTY_WITH_SYMBOL,
+            twse_month_cache={},
+        ),
     )
 
     assert result.iloc[0]["is_disposition"] is None

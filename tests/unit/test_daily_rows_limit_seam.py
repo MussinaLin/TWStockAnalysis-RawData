@@ -49,15 +49,17 @@ def test_build_daily_rows_then_build_raw_rows_places_limits_correctly() -> None:
     )
 
     result = run._build_daily_rows(
-        session=None,
         date=DATE,
         holdings=holdings,
-        twse_3insti=_EMPTY_WITH_SYMBOL,
-        twse_day_all=twse_day_all,
-        twse_mi_index=twse_mi_index,
-        tpex_quotes=_EMPTY_TPEX_QUOTES,
-        tpex_3insti=_EMPTY_WITH_SYMBOL,
-        twse_month_cache={},
+        provider=run.BatchSourceProvider(
+            session=None,
+            twse_3insti=_EMPTY_WITH_SYMBOL,
+            twse_day_all=twse_day_all,
+            twse_mi_index=twse_mi_index,
+            tpex_quotes=_EMPTY_TPEX_QUOTES,
+            tpex_3insti=_EMPTY_WITH_SYMBOL,
+            twse_month_cache={},
+        ),
     )
 
     assert set(result["symbol"]) == {"2330", "3605"}
