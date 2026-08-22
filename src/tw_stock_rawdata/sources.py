@@ -33,6 +33,9 @@ TPEX_DAILY_QUOTES_V2_URL = (
 TPEX_3INSTI_V2_URL = (
     "https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade"
 )
+TPEX_STOCK_DAY_URL = (
+    "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
+)
 TWSE_COMPANY_BASIC_URL = "https://dts.twse.com.tw/opendata/t187ap03_L.csv"
 TPEX_COMPANY_BASIC_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
 TWSE_TAIEX_OHLC_URL = "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST"
@@ -675,6 +678,66 @@ def fetch_tpex_3insti_v2(
         df.columns = cols
 
     return df, data_date
+
+
+@_retry_on_transient(
+    attempts=PER_SYMBOL_RETRY_ATTEMPTS, max_delay=PER_SYMBOL_RETRY_MAX_DELAY
+)
+def fetch_tpex_stock_day(
+    session: requests.Session,
+    stock_no: str,
+    date: dt.date,
+) -> pd.DataFrame:
+    """抓單檔上櫃股在 `date` 所屬整月的日成交資訊（TPEX 個股月表）。
+
+    回傳原始 DataFrame，欄位為
+    `日 期 / 成交張數 / 成交仟元 / 開盤 / 最高 / 最低 / 收盤 / 漲跌 / 筆數`。
+    上市股對應的是 `fetch_twse_stock_day`（TWSE STOCK_DAY）。
+
+    2026-08-22 實測到三個容易踩的坑，改動前必讀：
+
+    1. `date` 參數是**西元** `yyyy/MM/dd`。repo 其他 TPEX v2 端點
+       （`dailyQuotes` / `insti/dailyTrade` / `margin/balance` / `bulletin/disposal`）
+       全部用 `_date_to_roc()` 的民國格式，**只有這一支相反**。若為了「一致性」
+       改成民國，端點會回 `{"stat":"參數輸入錯誤"}`。實測 `114/07`、`114/07/01`、
+       `1140701` 三種民國寫法全部失敗。
+    2. **不可**帶 `response=json`。這端點本來就直接回 JSON，多帶這個參數同樣會回
+       「參數輸入錯誤」。
+    3. **參數名打錯不會報錯，會靜默 fallback 回「當月」資料且 `stat=ok`**
+       （實測 `d=` / `ym=` / `yearMonth=` / `year=&month=` 全部被忽略）。所以回應的
+       `date` 必須驗證落在請求月份 —— 否則整段歷史回補會被寫入當月數字，而且
+       完全沒有任何錯誤訊號。這是本模組最容易靜默出錯的地方。
+
+    該檔該月無資料時 `_extract_tpex_v2_table` 會拋 `DataUnavailableError`，
+    而 `_retry_on_transient` 對它明確不重試，因此空月不會浪費請求配額。
+    """
+    month_start = date.replace(day=1)
+    params = {
+        "code": stock_no,
+        # 坑 1：西元，不是 _date_to_roc()
+        "date": f"{month_start.year}/{month_start.month:02d}/01",
+        # 坑 2：不加 response=json
+    }
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    response = session.get(TPEX_STOCK_DAY_URL, params=params, timeout=30, verify=False)
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except (ValueError, requests.exceptions.JSONDecodeError):
+        raise DataUnavailableError("TPEX 個股月表回傳非 JSON")
+
+    if payload.get("stat") not in {None, "ok", "OK"}:
+        raise DataUnavailableError(payload.get("stat") or "TPEX 個股月表回傳異常")
+
+    # 坑 3 的防線：回應的 date 是 yyyyMMdd，前 6 碼必須等於請求月份。
+    echoed = str(payload.get("date") or "")
+    if echoed[:6] != month_start.strftime("%Y%m"):
+        raise DataUnavailableError(
+            f"TPEX 個股月表月份不匹配：回傳 {echoed!r}，請求 {month_start:%Y%m}"
+            "（端點對未知參數會靜默回當月，勿當成有效資料）"
+        )
+
+    return _extract_tpex_v2_table(payload, "個股日成交資訊")
 
 
 def fetch_twse_company_basic(session: requests.Session) -> pd.DataFrame:
