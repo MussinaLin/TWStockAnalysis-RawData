@@ -438,6 +438,76 @@ def find_twse_ohlcv(
     return open_price, high_price, low_price, close_price, volume
 
 
+def expand_twse_stock_day(
+    df: pd.DataFrame,
+) -> dict[dt.date, dict[str, float | int | None]]:
+    """把 TWSE STOCK_DAY 月表展開成 `date -> {open/high/low/close/volume/change}`。
+
+    `volume` 單位是**股**（STOCK_DAY 的「成交股數」本來就是股，直接沿用）。
+
+    除權息日的「漲跌價差」是 `X0.00`（X 為顯式除權息標記）。`_clean_number` 對它
+    的 `float()` 會拋 ValueError 而回 None —— 這正是我們要的：change 為 None 時
+    呼叫端算不出參考價，漲跌停寫 NULL。**絕不可**在此把 X 剝掉當成 0.0，那會讓
+    參考價等於收盤價，算出完全錯誤的漲跌停區間。
+    """
+    if df.empty or "日期" not in df.columns:
+        return {}
+
+    out: dict[dt.date, dict[str, float | int | None]] = {}
+    for _, row in df.iterrows():
+        date = _roc_to_date(row.get("日期"))
+        if date is None:
+            continue
+        out[date] = {
+            "open": _clean_number(row.get("開盤價")),
+            "high": _clean_number(row.get("最高價")),
+            "low": _clean_number(row.get("最低價")),
+            "close": _clean_number(row.get("收盤價")),
+            "volume": _clean_int(row.get("成交股數")),
+            "change": _clean_number(row.get("漲跌價差")),
+        }
+    return out
+
+
+def expand_tpex_stock_day(
+    df: pd.DataFrame,
+) -> dict[dt.date, dict[str, float | int | None]]:
+    """把 TPEX 個股月表展開成 `date -> {open/high/low/close/volume/change}`。
+
+    TPEX 月表的成交量欄位是「成交張數」，**在此 × 1000 換算成股**，讓兩個市場的
+    展開結果單位一致（呼叫端契約為股，`_build_daily_rows` 尾端再 `// 1000`）。
+    代價是失去零股尾數：實測 3,709 張 × 1000 = 3,709,000，實際 3,709,228 股。
+    對已寫入 DB 的「張」而言結果相同（3709 == 3709），僅 `turnover_rate` 有約
+    0.006% 相對誤差，已於設計階段確認接受。
+
+    日期欄位名稱是 `日 期`（中間有空白），不是 `日期`。
+
+    與 TWSE 不同，TPEX 月表在除權息日給的是**相對除息參考價的正確漲跌**
+    （6488 於 2025-07-16 除息 6 元，月表給 18.50 = 322.50 − 304.00），
+    不是標記字串。因此上櫃股回補時漲跌停算得出來，daily 模式走的
+    `dailyQuotes` 則因為漲跌欄是文字「除息」而為 NULL —— 這個不一致已於設計
+    階段確認接受（backfill 較準，搭配 upsert COALESCE 不會被 daily 蓋掉）。
+    """
+    if df.empty or "日 期" not in df.columns:
+        return {}
+
+    out: dict[dt.date, dict[str, float | int | None]] = {}
+    for _, row in df.iterrows():
+        date = _roc_to_date(row.get("日 期"))
+        if date is None:
+            continue
+        lots = _clean_int(row.get("成交張數"))
+        out[date] = {
+            "open": _clean_number(row.get("開盤")),
+            "high": _clean_number(row.get("最高")),
+            "low": _clean_number(row.get("最低")),
+            "close": _clean_number(row.get("收盤")),
+            "volume": None if lots is None else lots * 1000,
+            "change": _clean_number(row.get("漲跌")),
+        }
+    return out
+
+
 @_retry_on_transient
 def fetch_twse_t86(session: requests.Session, date: dt.date) -> pd.DataFrame:
     """Fetch institutional investor buy/sell data from TWSE T86 (三大法人買賣超).
