@@ -2,9 +2,8 @@
 
 契約重點：
 - ohlcv().volume 與 insti() 一律回「股」（per-symbol 來源是張，provider 內 ×1000）
-- is_tpex 直接回 stocks.market_type —— per-stock 模式下市場別是已知事實，
-  不需要 batch 模式那個「靠當日 tpex_quotes 推市場別」的 workaround
-- MoneyDJ 整段取得失敗 → insti_ok 為 False → 該檔每一天都跳過不寫
+- insti_ok 只問「這檔的 MoneyDJ 有沒有抓到」，與市場別無關（MoneyDJ 不分市場）
+- MoneyDJ 整段取得失敗 → insti_ok 為 False → 該檔每一天都跳過不寫，月表也不必抓
 """
 
 from __future__ import annotations
@@ -86,14 +85,19 @@ def test_missing_date_yields_empty_ohlcv(wired) -> None:
     assert result.volume is None
 
 
-def test_is_tpex_uses_market_type_directly(wired) -> None:
+def test_insti_ok_ignores_market_type(wired) -> None:
+    """per-stock 模式的 gating 只問「這檔的 MoneyDJ 有沒有抓到」，
+    沒有市場別這個中間概念（MoneyDJ 不分市場）。"""
     provider = run.PerSymbolRangeProvider.build(
         session=None, symbols=["2330"], market_types={"2330": "twse"},
         start=START, end=END,
     )
 
-    assert provider.is_tpex("2330", "twse") is False
-    assert provider.is_tpex("6488", "tpex") is True
+    assert provider.insti_ok("2330", "twse") is True
+    assert provider.insti_ok("2330", "tpex") is True
+    assert provider.insti_ok("2330", None) is True
+    # 沒預取過的個股一律 False（不可預設放行）
+    assert provider.insti_ok("6488", "tpex") is False
 
 
 def test_insti_ok_false_when_moneydj_failed(monkeypatch) -> None:
@@ -112,6 +116,60 @@ def test_insti_ok_false_when_moneydj_failed(monkeypatch) -> None:
 
     assert provider.insti_ok("2330", "twse") is False
     assert provider.insti("2330", D) == (None, None, None)
+
+
+def test_moneydj_failure_skips_month_tables_entirely(monkeypatch) -> None:
+    """MoneyDJ 失敗的個股不再抓月表。
+
+    兩個理由：那些價格一列都寫不進去（每天都過不了 insti_ok gating），而且
+    traded_dates 是空的、限流判準整個失效，等於白打幾十發沒有保護的請求。
+    """
+    month_calls: list[dt.date] = []
+    monkeypatch.setattr(
+        run, "fetch_twse_stock_day",
+        lambda session, stock_no, date: month_calls.append(date) or _twse_month_df(),
+    )
+    monkeypatch.setattr(
+        run, "fetch_moneydj_holding_pct",
+        lambda *a, **k: (_ for _ in ()).throw(DataUnavailableError("down")),
+    )
+
+    provider = run.PerSymbolRangeProvider.build(
+        session=None, symbols=["2330"], market_types={"2330": "twse"},
+        start=dt.date(2023, 1, 1), end=dt.date(2025, 12, 31),
+    )
+
+    assert month_calls == []
+    assert provider.ohlcv("2330", D, "twse").close is None
+
+
+def test_summary_inputs_are_exposed(monkeypatch) -> None:
+    """收尾摘要要用的兩份資料：整檔失敗的個股、判定失敗的月份。"""
+    monkeypatch.setattr(
+        run, "fetch_moneydj_holding_pct",
+        lambda session, symbol, start, end: (
+            (_ for _ in ()).throw(DataUnavailableError("down"))
+            if symbol == "2317" else _moneydj_raw()
+        ),
+    )
+    # 2330 的 7 月月表回空，但 MoneyDJ 有 7/31 → 判定為取得失敗
+    monkeypatch.setattr(
+        run, "fetch_twse_stock_day",
+        lambda *a, **k: (_ for _ in ()).throw(DataUnavailableError("無資料")),
+    )
+    monkeypatch.setattr(
+        run, "fetch_tpex_stock_day",
+        lambda *a, **k: (_ for _ in ()).throw(DataUnavailableError("無資料")),
+    )
+
+    provider = run.PerSymbolRangeProvider.build(
+        session=None, symbols=["2330", "2317"],
+        market_types={"2330": "twse", "2317": "twse"},
+        start=START, end=END,
+    )
+
+    assert provider.insti_failed_symbols == ["2317"]
+    assert provider.failed_months_by_symbol == {"2330": [dt.date(2025, 7, 1)]}
 
 
 def test_resolved_market_types_exposed(wired) -> None:

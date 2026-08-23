@@ -69,17 +69,52 @@ def test_batch_provider_insti_matches_free_function() -> None:
     )
 
 
-def test_batch_provider_is_tpex_uses_todays_tpex_quotes() -> None:
-    """batch 模式的 is_tpex 反映「今天價格誰供應的」，來源是當日 tpex_quotes，
-    刻意不看 stocks.market_type —— 這是既有設計，不可改。"""
+def test_batch_provider_gating_uses_todays_tpex_quotes_not_market_type() -> None:
+    """batch 模式判「這檔今天的價格是誰供應的」只看當日 tpex_quotes，
+    刻意不看 stocks.market_type —— 這是既有設計，不可改。
+
+    `is_tpex` 已不是 `RowSourceProvider` 介面的一員（沒有任何呼叫端），所以這裡
+    改從唯一的公開接縫 `insti_ok()` 驗證同一件事：兩個市場的三大法人狀態刻意設成
+    相反，回答就完全取決於該檔算哪個市場。
+    """
     quotes = pd.DataFrame([{
         "symbol": "3105", "name": "穩懋", "open": 1.0, "close": 1.0,
         "high": 1.0, "low": 1.0, "volume": 1, "change": 0.0,
     }])
-    provider = _provider(tpex_quotes=quotes)
+    provider = _provider(
+        tpex_quotes=quotes, twse_insti_ok=False, tpex_insti_ok=True
+    )
 
-    assert provider.is_tpex("3105", market_type=None) is True
-    assert provider.is_tpex("2330", market_type="tpex") is False
+    # 出現在當日 tpex_quotes → 算上櫃，即使 market_type 說是上市
+    assert provider.insti_ok("3105", market_type="twse") is True
+    # 不在當日 tpex_quotes → 算上市，即使 market_type 說是上櫃
+    assert provider.insti_ok("2330", market_type="tpex") is False
+
+
+def test_batch_provider_passes_ohlcv_frames_by_keyword(monkeypatch) -> None:
+    """`_fetch_ohlcv_with_fallback` 的 twse_mi_index / tpex_quotes 型別相容，
+    位置傳遞時對調不會報錯、只會靜靜換掉 fallback 鏈（含 change 由誰供應）。"""
+    captured: dict = {}
+
+    def fake(*args, **kwargs):  # noqa: ANN001 - 測試替身
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return run.OhlcvResult(
+            open=None, close=None, high=None, low=None, volume=None, change=None
+        )
+
+    monkeypatch.setattr(run, "_fetch_ohlcv_with_fallback", fake)
+
+    mi = pd.DataFrame([_mi_index_row("2330")])
+    quotes = pd.DataFrame([{
+        "symbol": "3105", "name": "穩懋", "open": 1.0, "close": 1.0,
+        "high": 1.0, "low": 1.0, "volume": 1, "change": 0.0,
+    }])
+    _provider(twse_mi_index=mi, tpex_quotes=quotes).ohlcv("2330", DATE, "twse")
+
+    assert captured["args"] == ()
+    assert captured["kwargs"]["twse_mi_index"] is mi
+    assert captured["kwargs"]["tpex_quotes"] is quotes
 
 
 def test_batch_provider_insti_ok_follows_market() -> None:

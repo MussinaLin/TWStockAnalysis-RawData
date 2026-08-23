@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 
 import pandas as pd
@@ -52,9 +53,6 @@ class _StubProvider:
     def insti_ok(self, symbol, market_type):  # noqa: ANN001 - 測試替身
         return True
 
-    def is_tpex(self, symbol, market_type):  # noqa: ANN001 - 測試替身
-        return False
-
 
 def test_run_for_date_with_provider_skips_batch_fetches(
     batch_spies, monkeypatch
@@ -94,7 +92,13 @@ def test_run_for_date_with_provider_skips_batch_fetches(
 def test_run_for_date_without_provider_still_fetches_batches(
     batch_spies, monkeypatch
 ) -> None:
-    """不傳 provider 時維持現行行為（daily / 全市場 backfill 不受影響）。"""
+    """不傳 provider 時維持現行行為（daily / 全市場 backfill 不受影響）。
+
+    快取／處置名單一律傳空的：這個測試只驗「批次來源有沒有被呼叫」，若哪天
+    `twse_confirmed` 之類的前置判斷改了而讓流程往下走，沒傳這些參數就會變成
+    逐檔打真實的 MoneyDJ 與兩支處置公告端點（本 repo 有被限流封 IP 的前例，
+    見 memory/twse-rate-limit-ambiguous-response.md）。
+    """
     holdings = pd.DataFrame([{"symbol": "2330", "market_type": "twse"}])
 
     class _Config:
@@ -109,6 +113,9 @@ def test_run_for_date_without_provider_still_fetches_batches(
         config=_Config(),
         today=dt.date(2026, 8, 22),
         write_market_daily=False,
+        margin_cache={},
+        holding_pct_cache={},
+        disposition=run.DispositionData(by_date={}, ok_markets=frozenset()),
     )
 
     assert batch_spies["mi_index"] >= 1
@@ -259,6 +266,102 @@ def test_per_symbol_range_provider_fetches_holding_pct_once_per_symbol(
     for _, row in output_df.iterrows():
         assert row["foreign_holding_pct"] == pytest.approx(0.7354)
         assert row["insti_holding_pct"] == pytest.approx(0.7679)
+
+
+def test_reversed_backfill_range_is_normalized_before_prefetch(monkeypatch) -> None:
+    """`--backfill-start` 比 `--backfill-end` 晚時不可變成靜默 no-op。
+
+    `_build_date_range` 會正規化，但 `_prefetch_margin_cache` /
+    `PerSymbolRangeProvider.build` 吃的是 start_date / end_date 本身；顛倒時
+    `_month_starts` 回空 list，一發 OHLCV 都不抓，卻照樣印出「N 天」的抬頭。
+    """
+    seen: dict[str, tuple] = {}
+
+    monkeypatch.setattr(run, "build_session", lambda: None)
+    monkeypatch.setattr(run, "load_market_types", lambda url: {})
+    monkeypatch.setattr(run, "load_stock_names", lambda url: {})
+    monkeypatch.setattr(run, "_get_issued_shares", lambda session, config: {})
+    monkeypatch.setattr(
+        run, "_prefetch_margin_cache",
+        lambda session, holdings, start, end: seen.__setitem__("margin", (start, end)) or {},
+    )
+    monkeypatch.setattr(
+        run, "_fetch_disposition",
+        lambda session, start, end: seen.__setitem__("disposition", (start, end))
+        or run.DispositionData(by_date={}, ok_markets=frozenset()),
+    )
+    monkeypatch.setattr(
+        run.PerSymbolRangeProvider, "build",
+        classmethod(
+            lambda cls, session, symbols, market_types, start, end: (
+                seen.__setitem__("provider", (start, end))
+                or cls(
+                    ohlcv_by_symbol={}, insti_by_symbol={}, insti_ok_by_symbol={},
+                    resolved_market_types={}, holding_pct_cache={},
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(run, "_run_for_date", lambda *a, **k: False)
+
+    args = argparse.Namespace(
+        date=None, dahu=False, update_shares=False,
+        backfill_limits=False, backfill_disposition=False,
+        backfill_stocks="2330",
+        backfill_start="2025-10-15", backfill_end="2025-08-01",  # 顛倒
+        force=False,
+    )
+
+    class _Config:
+        database_url = "postgresql://stub"
+
+    run._main_inner(_Config(), args, dt.date(2026, 8, 22), dt.date(2026, 8, 22))
+
+    normalized = (dt.date(2025, 8, 1), dt.date(2025, 10, 15))
+    assert seen["margin"] == normalized
+    assert seen["disposition"] == normalized
+    assert seen["provider"] == normalized
+
+
+def _provider_with(insti_ok: dict[str, bool], failed_months: dict) -> run.PerSymbolRangeProvider:
+    return run.PerSymbolRangeProvider(
+        ohlcv_by_symbol={},
+        insti_by_symbol={},
+        insti_ok_by_symbol=insti_ok,
+        resolved_market_types={},
+        holding_pct_cache={},
+        failed_months_by_symbol=failed_months,
+    )
+
+
+def test_summary_reports_days_symbols_and_failed_months(capsys) -> None:
+    """回補 1 檔 3 年會印約 780 行逐日訊息，唯一的解釋行早就捲不見了；
+    收尾摘要必須把「寫了幾天／哪檔整檔沒寫／哪些月沒寫」重講一次。"""
+    run._print_backfill_stocks_summary(
+        provider=_provider_with(
+            insti_ok={"2330": True, "2317": False},
+            failed_months={"2330": [dt.date(2025, 7, 1), dt.date(2025, 8, 1)]},
+        ),
+        total_days=780,
+        written_days=520,
+    )
+
+    out = capsys.readouterr().out
+    assert "780" in out and "520" in out and "260" in out
+    assert "2317" in out          # MoneyDJ 整檔失敗的個股
+    assert "2025-07" in out and "2025-08" in out
+
+
+def test_summary_says_so_when_nothing_failed(capsys) -> None:
+    run._print_backfill_stocks_summary(
+        provider=_provider_with(insti_ok={"2330": True}, failed_months={}),
+        total_days=10,
+        written_days=7,
+    )
+
+    out = capsys.readouterr().out
+    assert "全部個股取得成功" in out
+    assert "沒有判定為取得失敗的月份" in out
 
 
 if __name__ == "__main__":

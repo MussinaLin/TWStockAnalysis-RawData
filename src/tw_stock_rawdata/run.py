@@ -501,6 +501,13 @@ def _stock_sources_ok(
 # 足以覆蓋，且端點吃區間查詢，窗口拉長不增加請求數。
 _DISPOSITION_LOOKBACK_DAYS = 45
 
+# 單次處置公告查詢的最長窗口（日曆日，≈ 6 個月）。設計階段實測到 6 個月為止
+# 都沒有截斷（314/574 列），再長就沒驗證過了。而截斷的後果不是「缺 NULL」而是
+# **寫錯**：漏掉的公告會讓 `DispositionData.resolve` 走到「該市場已成功取得」
+# 的分支回 (False, 0)，用 COALESCE 覆蓋掉原本正確的處置註記（見 CLAUDE.md）。
+# 回補 3 年切成 7 段、兩市場共 14 發，相對於整段約 50 發的預算可忽略。
+_DISPOSITION_MAX_WINDOW_DAYS = 183
+
 
 class DispositionData(NamedTuple):
     """處置名單：展開好的 date -> symbol -> 撮合分鐘數，加上各市場的取得狀態。
@@ -539,6 +546,17 @@ class DispositionData(NamedTuple):
         return None, None
 
 
+def _disposition_windows(start: dt.date, end: dt.date) -> list[tuple[dt.date, dt.date]]:
+    """把 [start, end] 切成連續、不重疊、每段 ≤ _DISPOSITION_MAX_WINDOW_DAYS 的窗口。"""
+    windows: list[tuple[dt.date, dt.date]] = []
+    cur = start
+    while cur <= end:
+        stop = min(cur + dt.timedelta(days=_DISPOSITION_MAX_WINDOW_DAYS - 1), end)
+        windows.append((cur, stop))
+        cur = stop + dt.timedelta(days=1)
+    return windows
+
+
 def _fetch_disposition(
     session: requests.Session,
     start: dt.date,
@@ -549,10 +567,25 @@ def _fetch_disposition(
     查詢窗口自動往前推 _DISPOSITION_LOOKBACK_DAYS（見常數說明），展開後只保留
     [start, end] 內的日期。任一市場失敗只影響該市場，不中斷另一邊。
 
+    長區間會切成 ≤ _DISPOSITION_MAX_WINDOW_DAYS 的多個窗口分別查、再合併，
+    避免踩到未驗證過的截斷行為（見該常數說明）。合併時 `ok_markets` 採
+    **全部窗口都成功才算 ok**：只要有一段沒拿到，該市場當天就可能有公告沒被
+    看到，這時若還把該市場標成 ok，沒查到的個股會被寫成「已確認非處置」
+    (False, 0) 而不是 NULL —— 正是 CLAUDE.md 那段要防的事。
+    已成功窗口的資料仍然保留：它們只會產生 is_disposition=TRUE 的註記，那些是
+    確實看到公告才有的，永遠是對的。
+
     同一 (symbol, date) 可能對應多筆公告（例如處置期間重疊），取最小分鐘數
     ＝當日實際生效的最嚴格撮合頻率。
     """
     fetch_start = start - dt.timedelta(days=_DISPOSITION_LOOKBACK_DAYS)
+    windows = _disposition_windows(fetch_start, end)
+    if not windows:
+        # start > end（呼叫端沒正規化）：一段都查不到就不能宣稱任何市場 ok，
+        # 否則 resolve() 會把整段寫成「已確認非處置」(False, 0)。
+        print(f"處置股名單：查詢區間無效（{fetch_start} > {end}），該欄位本次不寫入")
+        return DispositionData({}, frozenset())
+
     by_date: dict[dt.date, dict[str, int | None]] = {}
     ok_markets: set[str] = set()
 
@@ -560,32 +593,41 @@ def _fetch_disposition(
         ("twse", fetch_twse_disposition),
         ("tpex", fetch_tpex_disposition),
     ):
-        try:
-            frame = prepare_disposition(fetcher(session, fetch_start, end))
-        except (DataUnavailableError, requests.RequestException) as exc:
-            print(f"處置股名單（{market}）取得失敗：{exc}")
-            continue
+        market_ok = True
+        frames: list[pd.DataFrame] = []
+        for win_start, win_end in windows:
+            try:
+                frames.append(prepare_disposition(fetcher(session, win_start, win_end)))
+            except (DataUnavailableError, requests.RequestException) as exc:
+                print(f"處置股名單（{market} {win_start} ~ {win_end}）取得失敗：{exc}")
+                market_ok = False
 
-        ok_markets.add(market)
-        for _, row in frame.iterrows():
-            symbol = row["symbol"]
-            minutes = row["match_minutes"]
-            minutes = None if minutes is None or pd.isna(minutes) else int(minutes)
-            day = max(row["start_date"], start)
-            last = min(row["end_date"], end)
-            while day <= last:
-                slot = by_date.setdefault(day, {})
-                if symbol not in slot:
-                    slot[symbol] = minutes
-                elif minutes is not None and (slot[symbol] is None or minutes < slot[symbol]):
-                    slot[symbol] = minutes
-                day += dt.timedelta(days=1)
+        if market_ok:
+            ok_markets.add(market)
+
+        for frame in frames:
+            for _, row in frame.iterrows():
+                symbol = row["symbol"]
+                minutes = row["match_minutes"]
+                minutes = None if minutes is None or pd.isna(minutes) else int(minutes)
+                day = max(row["start_date"], start)
+                last = min(row["end_date"], end)
+                while day <= last:
+                    slot = by_date.setdefault(day, {})
+                    if symbol not in slot:
+                        slot[symbol] = minutes
+                    elif minutes is not None and (
+                        slot[symbol] is None or minutes < slot[symbol]
+                    ):
+                        slot[symbol] = minutes
+                    day += dt.timedelta(days=1)
 
     if ok_markets:
         n_days = len(by_date)
         n_symbols = len({s for day in by_date.values() for s in day})
         print(
-            f"處置股名單：{'／'.join(sorted(ok_markets))} 取得成功，"
+            f"處置股名單：{'／'.join(sorted(ok_markets))} 取得成功"
+            f"（每市場 {len(windows)} 段查詢），"
             f"{start} ~ {end} 內 {n_days} 天 / {n_symbols} 檔標的在處置期間"
         )
     else:
@@ -773,8 +815,6 @@ class RowSourceProvider(Protocol):
 
     def insti_ok(self, symbol: str, market_type: str | None) -> bool: ...
 
-    def is_tpex(self, symbol: str, market_type: str | None) -> bool: ...
-
 
 class BatchSourceProvider:
     """全市場批次來源的 provider（daily / 全市場 backfill 用）。
@@ -814,10 +854,16 @@ class BatchSourceProvider:
     def ohlcv(
         self, symbol: str, date: dt.date, market_type: str | None
     ) -> OhlcvResult:
+        # 全部具名傳遞：`twse_mi_index` 與 `tpex_quotes` 的順序若對調不會報錯，
+        # 但會改變 fallback 鏈的行為（包含 change 由誰供應）。
         return _fetch_ohlcv_with_fallback(
-            self._session, date, symbol,
-            self._twse_day_all, self._twse_mi_index,
-            self._tpex_quotes, self._twse_month_cache,
+            session=self._session,
+            date=date,
+            symbol=symbol,
+            twse_day_all=self._twse_day_all,
+            twse_mi_index=self._twse_mi_index,
+            tpex_quotes=self._tpex_quotes,
+            twse_month_cache=self._twse_month_cache,
             market_type=market_type,
         )
 
@@ -828,17 +874,21 @@ class BatchSourceProvider:
 
     def insti_ok(self, symbol: str, market_type: str | None) -> bool:
         return _stock_sources_ok(
-            is_tpex=self.is_tpex(symbol, market_type),
+            is_tpex=self._is_tpex(symbol, market_type),
             twse_insti_ok=self._twse_insti_ok,
             tpex_insti_ok=self._tpex_insti_ok,
         )
 
-    def is_tpex(self, symbol: str, market_type: str | None) -> bool:
+    def _is_tpex(self, symbol: str, market_type: str | None) -> bool:
         """batch 模式用「該檔今天有沒有出現在 tpex_quotes」判定。
 
         這反映的是「這檔今天的價格是誰供應的」，必須跟著當日實際來源走，
         刻意**不**用 `stocks.market_type`（那反映的是「本質上屬於哪個市場」，
         用途不同，見 `_build_daily_rows` docstring）。
+
+        只服務本類別的 `insti_ok()`，不是 `RowSourceProvider` 介面的一員——
+        另一個 provider 用完全不同的方式回答 `insti_ok()`，沒有「市場別」這個
+        中間概念。
         """
         return symbol in self._tpex_symbols
 
@@ -864,11 +914,15 @@ class PerSymbolRangeProvider:
         insti_ok_by_symbol: dict[str, bool],
         resolved_market_types: dict[str, str],
         holding_pct_cache: dict[str, dict[dt.date, dict]],
+        failed_months_by_symbol: dict[str, list[dt.date]] | None = None,
     ) -> None:
         self._ohlcv = ohlcv_by_symbol
         self._insti = insti_by_symbol
         self._insti_ok = insti_ok_by_symbol
         self.resolved_market_types = resolved_market_types
+        # 給收尾摘要用（見 main() 的 --backfill-stocks 分支）：整段跑完後，
+        # 逐日輸出已經捲過幾百行，操作者需要一行看得到哪些檔／哪些月沒寫進去。
+        self.failed_months_by_symbol = failed_months_by_symbol or {}
         # 外資/法人持股佔比：與三大法人在 build() 內同一次 MoneyDJ zcl fetch 解析出來。
         # 形狀對齊 `_prefetch_holding_pct_cache` 的回傳值（symbol -> date -> dict），
         # 呼叫端直接拿去當 `_build_daily_rows` 的 holding_pct_cache 用即可——
@@ -889,11 +943,17 @@ class PerSymbolRangeProvider:
         先抓 MoneyDJ（整段 1 發，同一份 HTML 同時解析出三大法人與持股佔比），
         再用三大法人的日期集合當「該檔哪些日子有交易」的外部證據，交給
         `_prefetch_symbol_ohlcv` 區分「月表回空」是沒交易還是被限流。順序不可對調。
+
+        MoneyDJ 失敗的個股**直接跳過月表**：該檔的每一天都不會通過 `insti_ok()`
+        gating，抓回來的價格一列也寫不進去；而且 traded_dates 是空的，限流判準
+        整個失效（回空一律當成沒交易）。回補 3 年就是白打 36 發沒有判準保護的
+        請求——MoneyDJ 會失敗，往往正代表這次連線已經有狀況。
         """
         ohlcv_by_symbol: dict[str, dict[dt.date, OhlcvResult]] = {}
         insti_by_symbol: dict[str, dict[dt.date, tuple]] = {}
         insti_ok_by_symbol: dict[str, bool] = {}
         holding_pct_by_symbol: dict[str, dict[dt.date, dict]] = {}
+        failed_months_by_symbol: dict[str, list[dt.date]] = {}
         resolved: dict[str, str] = {}
 
         total = len(symbols)
@@ -936,6 +996,13 @@ class PerSymbolRangeProvider:
             insti_ok_by_symbol[symbol] = insti_ok
             holding_pct_by_symbol[symbol] = holding_pct_map
 
+            if not insti_ok:
+                # 見 docstring：MoneyDJ 失敗 → 這檔整段都寫不進去，且限流判準失效，
+                # 月表不必再打。
+                ohlcv_by_symbol[symbol] = {}
+                print(f"    {symbol} 三大法人缺漏，整檔跳過（不再抓月表）")
+                continue
+
             # 2) 月表：OHLCV + change（每月 1 發），用 MoneyDJ 日期當限流判準
             fetched = _prefetch_symbol_ohlcv(
                 session=session,
@@ -949,6 +1016,7 @@ class PerSymbolRangeProvider:
             if fetched.market_type is not None:
                 resolved[symbol] = fetched.market_type
             if fetched.failed_months:
+                failed_months_by_symbol[symbol] = list(fetched.failed_months)
                 months = "、".join(f"{m:%Y-%m}" for m in fetched.failed_months)
                 print(f"    ⚠ {symbol} 以下月份判定為取得失敗、未寫入：{months}")
 
@@ -958,6 +1026,7 @@ class PerSymbolRangeProvider:
             insti_ok_by_symbol=insti_ok_by_symbol,
             resolved_market_types=resolved,
             holding_pct_cache=holding_pct_by_symbol,
+            failed_months_by_symbol=failed_months_by_symbol,
         )
 
     def ohlcv(
@@ -990,13 +1059,10 @@ class PerSymbolRangeProvider:
         """
         return self._insti_ok.get(symbol, False)
 
-    def is_tpex(self, symbol: str, market_type: str | None) -> bool:
-        """per-stock 模式下市場別是已知事實，直接用 stocks.market_type。
-
-        不需要 batch 模式那個「靠當日 tpex_quotes 推市場別」的 workaround。
-        """
-        resolved = self.resolved_market_types.get(symbol) or market_type
-        return resolved == "tpex"
+    @property
+    def insti_failed_symbols(self) -> list[str]:
+        """MoneyDJ 整段取得失敗、因而整檔一列都沒寫入的個股（收尾摘要用）。"""
+        return [symbol for symbol, ok in self._insti_ok.items() if not ok]
 
 
 def _build_daily_rows(
@@ -1019,10 +1085,12 @@ def _build_daily_rows(
     2. 該檔市場別的三大法人來源 fetch 失敗（見 _stock_sources_ok）。
     跳過的個股留待重跑 / backfill 補上（搭配 upsert 的 COALESCE）。
 
-    市場別有兩個獨立訊號，用途不同、不要互相取代：
-    - gating 用 `provider.is_tpex()`。batch provider 以「該檔是否出現在當日
-      tpex_quotes」回答，反映「這檔今天的價格是誰供應的」；per-symbol provider
-      直接回答 stocks.market_type，因為那個模式下市場別是已知事實。
+    三大法人的 gating 與 OHLCV fallback 是兩個獨立訊號，用途不同、不要互相取代：
+    - gating 一律走 `provider.insti_ok()`，本函式不自己判市場別。兩個 provider
+      回答的方式完全不同：`BatchSourceProvider` 先用「該檔是否出現在當日
+      tpex_quotes」推出該檔今天的價格是誰供應的（見其私有的 `_is_tpex()`），
+      再看該市場的三大法人整批有沒有抓成功；`PerSymbolRangeProvider` 則直接回答
+      「這檔的 MoneyDJ 整段有沒有抓成功」，根本沒有市場別這個中間概念。
     - OHLCV fallback 用 holdings 的 `stocks.market_type`（見
       `_fetch_ohlcv_with_fallback`），反映「這檔本質上屬於哪個市場」，不能依賴
       當日 tpex_quotes 是否抓成功 —— 否則 TPEX 整批失敗時，上櫃股又會退回去打
@@ -1524,13 +1592,24 @@ def _month_starts(start: dt.date, end: dt.date) -> list[dt.date]:
     return months
 
 
+def _month_end(month: dt.date) -> dt.date:
+    """回傳該月最後一天（輸入為月初日期）。"""
+    return (month + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
+
+
 def _fetch_month_ohlcv(
     session: requests.Session,
     symbol: str,
     market_type: str,
     month: dt.date,
 ) -> dict[dt.date, OhlcvResult]:
-    """抓單檔單月的月表並展開。該月無資料時拋 DataUnavailableError。"""
+    """抓單檔單月的月表並展開。該月無資料時拋 DataUnavailableError。
+
+    回傳只保留**該月**的日期。TPEX 那支有強制月份驗證（參數無效會靜默 fallback
+    回當月），TWSE 則沒有；若回到別的月份，`_prefetch_symbol_ohlcv` 的
+    `if month_rows:` 會誤判成「這個月抓到了」，把真正缺料的月份藏起來，讓
+    MoneyDJ 交叉比對這道防線失效。過濾掉就不會有這種假陽性。
+    """
     if market_type == "tpex":
         raw = fetch_tpex_stock_day(session, symbol, month)
         expanded = expand_tpex_stock_day(raw)
@@ -1538,6 +1617,7 @@ def _fetch_month_ohlcv(
         raw = fetch_twse_stock_day(session, symbol, month)
         expanded = expand_twse_stock_day(raw)
 
+    last = _month_end(month)
     return {
         date: OhlcvResult(
             open=vals["open"], close=vals["close"],
@@ -1545,6 +1625,7 @@ def _fetch_month_ohlcv(
             volume=vals["volume"], change=vals["change"],
         )
         for date, vals in expanded.items()
+        if month <= date <= last
     }
 
 
@@ -1569,46 +1650,116 @@ def _prefetch_symbol_ohlcv(
     `traded_dates`（該檔在 MoneyDJ zcl 出現過的日期，整段只打一發、不經 TWSE）
     當外部證據：若 MoneyDJ 證明該月有交易而月表回空，就記進 failed_months 並
     警告，該月不寫；兩邊都沒有才當成「該檔那個月本來就沒交易」。
+
+    **跨市場補救**：判定失敗之前會再試另一個市場的月表一次。上櫃轉上市每年約
+    10~20 檔，`stocks.market_type` 只記得轉換後的市場，轉換前的月份在該市場的
+    月表必定回空，而 MoneyDJ 不分市場、照樣有列 —— 沒有這一步就會被判成限流，
+    叫操作者重跑一個永遠不會成功的區間（舊的批次 fallback 鏈是從 tpex_quotes
+    透明拿到那些天的，不會有這個問題）。只在「回空且 MoneyDJ 有交易」時才多打
+    一發，正常情況零成本；真被限流時兩邊都回空，判準的準確度不受影響。
+    定調後的 `resolved` 不因此改變：它代表該檔現在屬於哪個市場，要拿去寫回
+    holdings 供處置註記使用。
+
+    **訊息紀律**：`DataUnavailableError`（該月沒資料）是預期情況——回補剛上市不久
+    的個股，前面幾十個月都會是這樣——只在真的判定為失敗時才連同原因印出來，
+    否則會用幾十行雜訊淹沒同一個輸出流裡的 ⚠ 限流警告。`RequestException`
+    （連線／HTTP 層真的失敗）則一律印，包含探測市場別的那條路徑。
     """
     by_date: dict[dt.date, OhlcvResult] = {}
     failed_months: list[dt.date] = []
     resolved = market_type
 
+    def fetch_month(candidate: str, month: dt.date) -> tuple[dict[dt.date, OhlcvResult], str]:
+        """回傳 (該月資料, 失敗原因)。原因只在判定失敗時才會被印出來。"""
+        try:
+            return _fetch_month_ohlcv(session, symbol, candidate, month), ""
+        except DataUnavailableError as exc:
+            return {}, str(exc)
+        except requests.RequestException as exc:
+            print(f"    {symbol} {month:%Y-%m} {candidate} 月表請求失敗：{exc}")
+            return {}, str(exc)
+
     for month in _month_starts(start, end):
         month_rows: dict[dt.date, OhlcvResult] = {}
+        reason = ""
 
         if resolved is None:
             # 市場別未知：先 TWSE 後 TPEX，以先取得資料者定調。
             for candidate in ("twse", "tpex"):
-                try:
-                    month_rows = _fetch_month_ohlcv(session, symbol, candidate, month)
-                except (DataUnavailableError, requests.RequestException):
-                    continue
+                month_rows, reason = fetch_month(candidate, month)
                 if month_rows:
                     resolved = candidate
                     break
         else:
-            try:
-                month_rows = _fetch_month_ohlcv(session, symbol, resolved, month)
-            except (DataUnavailableError, requests.RequestException) as exc:
-                print(f"    {symbol} {month:%Y-%m} 月表取得失敗：{exc}")
+            month_rows, reason = fetch_month(resolved, month)
 
         if month_rows:
             by_date.update(month_rows)
             continue
 
         # 月表沒給東西 —— 是「沒交易」還是「被限流」？用 MoneyDJ 當外部證據。
-        month_end = (month + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
-        if any(month <= d <= month_end for d in traded_dates):
-            failed_months.append(month)
-            print(
-                f"    ⚠ {symbol} {month:%Y-%m} 月表回空，但 MoneyDJ 顯示該月有交易"
-                "：判定為限流／取得失敗，該月不寫入（請稍後重跑此區間）"
-            )
+        if not any(month <= d <= _month_end(month) for d in traded_dates):
+            continue
+
+        # MoneyDJ 說該月有交易。先排除「該月這檔還在另一個市場」（市場別轉換）。
+        if resolved is not None:
+            other = "tpex" if resolved == "twse" else "twse"
+            month_rows, _ = fetch_month(other, month)
+            if month_rows:
+                print(
+                    f"    {symbol} {month:%Y-%m} 改由 {other} 月表取得"
+                    "（該月的市場別與 stocks.market_type 不同，應為市場別轉換）"
+                )
+                by_date.update(month_rows)
+                continue
+
+        failed_months.append(month)
+        detail = f"（{reason}）" if reason else ""
+        print(
+            f"    ⚠ {symbol} {month:%Y-%m} 月表回空{detail}，但 MoneyDJ 顯示該月有交易"
+            "：判定為限流／取得失敗，該月不寫入（請稍後重跑此區間）"
+        )
 
     return SymbolOhlcv(
         by_date=by_date, market_type=resolved, failed_months=failed_months
     )
+
+
+def _print_backfill_stocks_summary(
+    *,
+    provider: PerSymbolRangeProvider,
+    total_days: int,
+    written_days: int,
+) -> None:
+    """`--backfill-stocks` 跑完後的收尾摘要。
+
+    回補 1 檔 3 年會印出約 780 行幾乎一模一樣的逐日訊息；真正要看的
+    「這檔三大法人整段沒抓到、所以一列都沒寫」只在最開頭出現一次，早就捲不見了。
+    收尾時重印一次，讓操作者不必往回捲幾百行才知道這次到底寫進去什麼。
+    """
+    print("--- --backfill-stocks 摘要 ---")
+    print(
+        f"日期：共 {total_days} 天，寫入 {written_days} 天、"
+        f"未寫入 {total_days - written_days} 天（未寫入含非交易日）"
+    )
+
+    insti_failed = provider.insti_failed_symbols
+    if insti_failed:
+        print(
+            f"三大法人（MoneyDJ）取得失敗、整檔未寫入：{'、'.join(insti_failed)}"
+            "（請稍後重跑這些個股）"
+        )
+    else:
+        print("三大法人（MoneyDJ）：全部個股取得成功")
+
+    failed_months = provider.failed_months_by_symbol
+    if failed_months:
+        n_months = sum(len(months) for months in failed_months.values())
+        print(f"月表判定為取得失敗、未寫入的月份共 {n_months} 個（請稍後重跑這些區間）：")
+        for symbol, months in failed_months.items():
+            print(f"  {symbol}：{'、'.join(f'{m:%Y-%m}' for m in months)}")
+    else:
+        print("月表：沒有判定為取得失敗的月份")
 
 
 def _run_for_date(
@@ -2312,6 +2463,11 @@ def _main_inner(
         start_date = _parse_date(args.backfill_start)
         end_date = _parse_date(args.backfill_end)
         backfill_dates = _build_date_range(start_date, end_date)
+        # 正規化後再往下傳：`_build_date_range` 會處理起訖顛倒，但下面的
+        # `_prefetch_margin_cache` / `PerSymbolRangeProvider.build` 吃的是
+        # start_date / end_date 本身。顛倒時 `_month_starts` 會回空 list，
+        # 整段一發 OHLCV 都不抓，卻照樣印出「N 天」的抬頭，變成靜默的 no-op。
+        start_date, end_date = backfill_dates[0], backfill_dates[-1]
         print(
             f"回補特定股票 {','.join(stock_list)}"
             f" ({len(backfill_dates)} 天：{start_date} ~ {end_date})"
@@ -2332,7 +2488,8 @@ def _main_inner(
         margin_cache = _prefetch_margin_cache(
             session, margin_holdings, start_date, end_date
         )
-        # 處置名單整段預取一次（兩市場各 1 次 HTTP），避免每天各打一次。
+        # 處置名單整段預取一次（每市場切成 ≤ 6 個月的窗口，見 _fetch_disposition），
+        # 避免每天各打一次。
         with _phase("預取處置股名單"):
             disposition = _fetch_disposition(session, start_date, end_date)
 
@@ -2363,7 +2520,7 @@ def _main_inner(
         ])
 
         sheet_names = set()  # 不需 dedup（force 模式忽略，沒 force 也沒 skip 邏輯）
-        any_written = False
+        written_days = 0
         for date in backfill_dates:
             if _run_for_date(
                 session, date, stocks_holdings, sheet_names, twse_month_cache,
@@ -2376,12 +2533,18 @@ def _main_inner(
                 disposition=disposition,
                 provider=provider,
             ):
-                any_written = True
+                written_days += 1
         # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ
         # 修正版，但實際左邊界前一天不在 prefetch 範圍內，可能仍是 provisional）
         # 使用 backfill_dates[0]（_build_date_range 已正規化 reversed/one-sided 輸入）
-        if any_written:
+        if written_days:
             _refresh_prev_day_margin(session, stocks_holdings, backfill_dates[0], config)
+
+        _print_backfill_stocks_summary(
+            provider=provider,
+            total_days=len(backfill_dates),
+            written_days=written_days,
+        )
         return
 
     # Load enabled stocks from DB
@@ -2413,7 +2576,8 @@ def _main_inner(
 
         margin_cache = _prefetch_margin_cache(session, holdings, start_date, end_date)
         holding_pct_cache = _prefetch_holding_pct_cache(session, holdings, start_date, end_date)
-        # 處置名單整段預取一次（兩市場各 1 次 HTTP），避免每天各打一次。
+        # 處置名單整段預取一次（每市場切成 ≤ 6 個月的窗口，見 _fetch_disposition），
+        # 避免每天各打一次。
         with _phase("預取處置股名單"):
             disposition = _fetch_disposition(session, start_date, end_date)
 

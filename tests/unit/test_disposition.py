@@ -305,6 +305,102 @@ def test_fetch_disposition_one_market_failure_does_not_block_other(monkeypatch) 
     assert data.resolve(dt.date(2026, 8, 20), "2330", "twse") == (None, None)
 
 
+def test_fetch_disposition_chunks_long_range_into_windows(monkeypatch) -> None:
+    """長區間要切成 ≤ 6 個月的窗口分別查。
+
+    設計階段只驗證到 6 個月沒有截斷；一次查 3 年是沒驗過的行為，而截斷的後果不是
+    「缺 NULL」而是**寫錯**——漏掉的公告會讓 resolve() 回 (False, 0)「已確認非處置」，
+    用 COALESCE 蓋掉原本正確的註記。
+    """
+    calls: list[tuple[dt.date, dt.date]] = []
+    _patch_fetchers(monkeypatch, calls=calls)
+    start, end = dt.date(2023, 1, 1), dt.date(2025, 12, 31)
+    run._fetch_disposition(None, start, end)
+
+    twse_windows = calls[: len(calls) // 2]
+    assert len(calls) == 2 * len(twse_windows)         # 兩市場切法一致
+    assert calls[len(calls) // 2:] == twse_windows
+
+    # 窗口必須連續、不重疊、剛好覆蓋 [start - 45 天, end]
+    assert twse_windows[0][0] == start - dt.timedelta(days=run._DISPOSITION_LOOKBACK_DAYS)
+    assert twse_windows[-1][1] == end
+    for (_, prev_end), (next_start, _) in zip(twse_windows, twse_windows[1:]):
+        assert next_start == prev_end + dt.timedelta(days=1)
+    for win_start, win_end in twse_windows:
+        assert (win_end - win_start).days + 1 <= run._DISPOSITION_MAX_WINDOW_DAYS
+
+
+def test_fetch_disposition_merges_rows_from_all_windows(monkeypatch) -> None:
+    """不同窗口回來的公告都要合併進 by_date。"""
+
+    def fetcher(_session, start, end):
+        rows = [
+            row for row in (
+                _twse_row("2330", "112/03/01～112/03/02", "約每二十分鐘撮合一次"),
+                _twse_row("5321", "114/09/01～114/09/02", "約每五分鐘撮合一次"),
+            )
+            # 只在公告日期落在該窗口時回傳，模擬端點的區間查詢
+            if start <= dt.date(1911 + int(row[6][:3]), int(row[6][4:6]), int(row[6][7:9])) <= end
+        ]
+        return pd.DataFrame(rows, columns=_TWSE_FIELDS)
+
+    monkeypatch.setattr(run, "fetch_twse_disposition", fetcher)
+    monkeypatch.setattr(
+        run, "fetch_tpex_disposition",
+        lambda *a, **k: pd.DataFrame([], columns=_TPEX_FIELDS),
+    )
+
+    data = run._fetch_disposition(None, dt.date(2023, 1, 1), dt.date(2025, 12, 31))
+
+    assert data.ok_markets == frozenset({"twse", "tpex"})
+    assert data.by_date[dt.date(2023, 3, 1)] == {"2330": 20}
+    assert data.by_date[dt.date(2025, 9, 1)] == {"5321": 5}
+
+
+def test_fetch_disposition_partial_window_failure_marks_market_not_ok(
+    monkeypatch,
+) -> None:
+    """一個窗口失敗 → 該市場整段都不算 ok。
+
+    否則沒查到的個股會被寫成「已確認非處置」(False, 0)，而依據是不完整的名單。
+    已成功窗口的 TRUE 註記仍然保留：那些是確實看到公告才有的。
+    """
+    def fetcher(_session, start, end):
+        if start >= dt.date(2025, 1, 1):
+            raise requests.ConnectionError("boom")
+        return pd.DataFrame(
+            [_twse_row("2330", "112/03/01～112/03/02", "約每二十分鐘撮合一次")],
+            columns=_TWSE_FIELDS,
+        )
+
+    monkeypatch.setattr(run, "fetch_twse_disposition", fetcher)
+    monkeypatch.setattr(
+        run, "fetch_tpex_disposition",
+        lambda *a, **k: pd.DataFrame([], columns=_TPEX_FIELDS),
+    )
+
+    data = run._fetch_disposition(None, dt.date(2023, 1, 1), dt.date(2025, 12, 31))
+
+    assert data.ok_markets == frozenset({"tpex"})
+    # 成功窗口的處置日仍然標得出來
+    assert data.resolve(dt.date(2023, 3, 1), "2330", "twse") == (True, 20)
+    # 沒查全的市場不可宣稱「已確認非處置」
+    assert data.resolve(dt.date(2024, 5, 6), "2330", "twse") == (None, None)
+
+
+def test_fetch_disposition_rejects_reversed_range(monkeypatch) -> None:
+    """起訖顛倒時一個窗口都切不出來 —— 這時**不可**宣稱任何市場 ok，
+    否則整段會被寫成「已確認非處置」。"""
+    calls: list[tuple[dt.date, dt.date]] = []
+    _patch_fetchers(monkeypatch, calls=calls)
+
+    data = run._fetch_disposition(None, dt.date(2025, 12, 31), dt.date(2023, 1, 1))
+
+    assert calls == []
+    assert data.ok_markets == frozenset()
+    assert data.by_date == {}
+
+
 def test_fetch_disposition_both_markets_failed(monkeypatch) -> None:
     _patch_fetchers(
         monkeypatch,
