@@ -444,6 +444,10 @@ def expand_twse_stock_day(
     """把 TWSE STOCK_DAY 月表展開成 `date -> {open/high/low/close/volume/change}`。
 
     `volume` 單位是**股**（STOCK_DAY 的「成交股數」本來就是股，直接沿用）。
+    成交量欄位名稱吃「成交股數」與「成交量」兩種——與 `find_twse_ohlcv` 的容忍度
+    一致。少了別名時，若 TWSE 改用「成交量」，OHLC 有值而 volume 為 None 的列
+    仍會被寫進 DB（`_build_daily_rows` 只看價格決定跳不跳），`turnover_rate`
+    也跟著變 NULL，靜默缺一欄。
 
     除權息日的「漲跌價差」是 `X0.00`（X 為顯式除權息標記）。`_clean_number` 對它
     的 `float()` 會拋 ValueError 而回 None —— 這正是我們要的：change 為 None 時
@@ -458,12 +462,15 @@ def expand_twse_stock_day(
         date = _roc_to_date(row.get("日期"))
         if date is None:
             continue
+        volume = _clean_int(row.get("成交股數"))
+        if volume is None:
+            volume = _clean_int(row.get("成交量"))
         out[date] = {
             "open": _clean_number(row.get("開盤價")),
             "high": _clean_number(row.get("最高價")),
             "low": _clean_number(row.get("最低價")),
             "close": _clean_number(row.get("收盤價")),
-            "volume": _clean_int(row.get("成交股數")),
+            "volume": volume,
             "change": _clean_number(row.get("漲跌價差")),
         }
     return out
@@ -1169,6 +1176,47 @@ def fetch_moneydj_margin(
     return result
 
 
+def _check_moneydj_zcl_header(table: pd.DataFrame) -> None:
+    """驗證 MoneyDJ zcl 表頭結構，對不上就拋 `DataUnavailableError`。
+
+    zcl 的欄位全靠**位置**取（col 1-3 三大法人買賣超、col 9-10 持股比重），
+    而 row 6 的子表頭無法單獨定位：「外資」在 row 6 出現兩次（index 1 屬買賣超、
+    index 5 屬估計持股），只有 row 5 的分組表頭分得出兩組，所以兩列必須一起驗。
+
+    為什麼一定要擋：col 1-3 是純整數，MoneyDJ 若插入/移除一欄，錯位後會把投信的
+    數字寫進 `foreign_net`——數量級合理、不會拋例外、也不會變成 NULL，等於永久
+    寫錯資料。拋出後 `--backfill-stocks` 會判定該檔 `insti_ok=False` 整檔跳過，
+    操作者看得見，這正是設計對 MoneyDJ 失敗既定的處理方式。
+    """
+
+    def cell(row: pd.Series, idx: int) -> str:
+        return str(row.iloc[idx]).strip()
+
+    row5 = table.iloc[5]
+    row6 = table.iloc[6]
+
+    groups_buy_sell = [cell(row5, i) for i in range(1, 5)]
+    groups_holding_pct = [cell(row5, i) for i in (9, 10)]
+    sub_headers = [cell(row6, i) for i in range(1, 4)]
+
+    if groups_buy_sell != ["買賣超"] * 4:
+        raise DataUnavailableError(
+            f"MoneyDJ zcl 表頭結構改變：col 1-4 的分組不是「買賣超」（{groups_buy_sell}）"
+        )
+    if groups_holding_pct != ["持股比重"] * 2:
+        raise DataUnavailableError(
+            f"MoneyDJ zcl 表頭結構改變：col 9-10 的分組不是「持股比重」（{groups_holding_pct}）"
+        )
+    if cell(row6, 0) != "日期":
+        raise DataUnavailableError(
+            f"MoneyDJ zcl 表頭結構改變：col 0 不是「日期」（{cell(row6, 0)}）"
+        )
+    if sub_headers != ["外資", "投信", "自營商"]:
+        raise DataUnavailableError(
+            f"MoneyDJ zcl 表頭結構改變：col 1-3 不是外資／投信／自營商（{sub_headers}）"
+        )
+
+
 def fetch_moneydj_holding_pct(
     session: requests.Session,
     symbol: str,
@@ -1221,6 +1269,9 @@ def fetch_moneydj_holding_pct(
     if target_table is None:
         raise DataUnavailableError("MoneyDJ 找不到法人持股表格")
 
+    # 位置取欄之前先驗表頭結構（見 `_check_moneydj_zcl_header`）。
+    _check_moneydj_zcl_header(target_table)
+
     data_rows = target_table.iloc[7:].copy()
 
     def _is_valid_date_row(val):
@@ -1241,6 +1292,7 @@ def fetch_moneydj_holding_pct(
     #   5-8   估計持股：外資 / 投信 / 自營商 / 單日合計
     #   9-10  持股比重：外資 / 三大法人
     # 三大法人買賣超與持股比重在**同一頁**，所以取三大法人不需要額外 HTTP 請求。
+    # 這個位置對映的正確性由上面的 `_check_moneydj_zcl_header` 把關，不可省略。
     # 這裡只做欄位切出，型別轉換留給 prepare_moneydj_holding_pct /
     # prepare_moneydj_insti，維持 fetch 層只負責取得與定位的分工。
     result = pd.DataFrame()

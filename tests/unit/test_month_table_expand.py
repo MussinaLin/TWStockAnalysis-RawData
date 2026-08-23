@@ -89,6 +89,23 @@ def test_expand_skips_unparsable_date_rows() -> None:
     assert expand_tpex_stock_day(df) == {}
 
 
+def test_twse_expand_accepts_alternate_volume_column_name() -> None:
+    """成交量欄位吃「成交股數」與「成交量」兩種名稱。
+
+    `find_twse_ohlcv`（daily 路徑）本來就吃兩種；這裡少了別名的話，TWSE 若改用
+    「成交量」，這條路徑會 OHLC 有值而 volume 是 None —— 該列照樣寫進 DB
+    （跳過與否只看價格），volume 與 turnover_rate 靜默變 NULL。
+    """
+    df = pd.DataFrame(
+        [["114/09/15", "24,000,000", "30,000,000", "1250.00", "1260.00",
+          "1245.00", "1255.00", "-5.00", "50,000", ""]],
+        columns=["日期", "成交量", "成交金額", "開盤價", "最高價", "最低價",
+                 "收盤價", "漲跌價差", "成交筆數", "註記"],
+    )
+
+    assert expand_twse_stock_day(df)[dt.date(2025, 9, 15)]["volume"] == 24_000_000
+
+
 def test_expand_empty_frame_returns_empty_dict() -> None:
     assert expand_twse_stock_day(pd.DataFrame()) == {}
     assert expand_tpex_stock_day(pd.DataFrame()) == {}

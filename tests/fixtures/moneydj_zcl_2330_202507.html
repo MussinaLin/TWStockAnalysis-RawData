@@ -1,0 +1,613 @@
+<!DOCTYPE>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=big5">
+<script language="JavaScript"><!--
+document.writeln('<script language="JavaScript" src="/z/js/jquery.djjs"></script>\n');
+// --></script>
+<script language="JavaScript" src="/z/js/jsFunction.djjs"></script>
+<script language="JavaScript" src="/z/js/isSpecialKind.djjs"></script>
+<script language="JavaScript" src="/z/js/mdj.js"></script>
+<script type="text/javascript" src="/z/js/Applet2Canvas.djjs"></script>
+<script type="text/javascript" src="/z/js/DJWebGraph.djjs"></script>
+<script type="text/javascript" src="/z/js/xml2jsonJS.djjs"></script>
+<script type="text/javascript" src="/z/js/json2xmlJS.djjs"></script>
+<script type="text/javascript" src="/z/js/json2.djjs"></script>
+<script type="text/javascript" src="/z/js/GenUpDownJS.djjs"></script>
+<link rel=stylesheet href="/z/js/mdj.css" type="text/css">
+<title>個股法人持股-2330</title>
+</head>
+<script language="JavaScript"><!--
+CheckMenu(4, '2330');
+function chkSetUpMenu(){ 
+	if (typeof(SetUpMenu) == 'function'){
+		SetUpMenu(4,'2330');
+}
+	else
+		setTimeout(function(){chkSetUpMenu();},5000);
+}
+// --></script>
+<body leftmargin="0" topmargin="0" marginwidth="0" marginheight="0">
+<div id="SysJustIFRAMEDIV">
+<table border="0" cellpadding="0" cellspacing="0" width="100%"><tr><td colspan="3" valign="top" align="left">
+<script language="javascript" src="/z/js/disableselectionjs.djjs"></script>
+<script language="javascript" src="/z/js/SU.js"></script>
+<script language="javascript"><!--
+ chkSetUpMenu();
+//--></script>
+</td></tr>
+<tr><td valign="top" align="left">
+<script language="javascript" src="/z/js/SL.js"></script>
+<script language="javascript"><!--
+ SetLeftMenu(4,'2330')
+//--></script>
+</td><td valign="top" width="99%">
+<script language="javascript"><!--
+if(typeof(ContentCenterBegin) == 'function'){ 	ContentCenterBegin();
+ } 
+//--></script>
+<form name="F">
+<table border="0"><tr><td class="t0">
+<table class="t01" border="0" cellspacing="1" cellpadding="1">
+<tr id="oScrollHead"><td class="t10" colspan="11">台積電(2330)法人持股走勢圖</td></tr>
+<tr id="oScrollHead"><td class="t3n0" colspan="11">
+<div id="SysJustWebGraphDIV"></div>
+</td></tr>
+<tr id="oScrollHead"><td class="t10" colspan="11">台積電(2330)法人持股明細</td></tr>
+<tr id="oScrollHead"><td class="t12" colspan="11">
+<select name="D" onChange="goA();">
+<option value="0" selected>請選擇</option>
+<option value="1">近五日</option>
+<option value="2">近十日</option>
+<option value="3">近20日</option>
+<option value="4">近40日</option>
+</select>
+ 自設區間：
+<script language="JavaScript" src="/z/js/month.djjs"></script>
+從　<SELECT name="Y2" onChange="javascript:SetMonthDate(document.F.Y2,document.F.M2,document.F.D2);">
+	<OPTION value="91"></OPTION>
+</SELECT>年 
+<SELECT name="M2" onChange="javascript:SetMonthDate(document.F.Y2,document.F.M2,document.F.D2);">
+	<OPTION value="-1"></OPTION>
+</SELECT>月 
+<SELECT name="D2">
+	<OPTION value="-1"></OPTION>
+</SELECT>日 
+ ～ 
+<SELECT name="Y1" onChange="javascript:SetMonthDate(document.F.Y1,document.F.M1,document.F.D1);">
+	<OPTION value="91"></OPTION>
+</SELECT>年 
+<SELECT name="M1" onChange="javascript:SetMonthDate(document.F.Y1,document.F.M1,document.F.D1);">
+	<OPTION value="-1"></OPTION>
+</SELECT>月 
+<SELECT name="D1">
+	<OPTION value="-1"></OPTION>
+</SELECT>日 
+<input type='hidden' name='bDate'>
+<input type='hidden' name='eDate'>
+<SCRIPT LANGUAGE=javascript><!--
+	var toDay ='2026/8/22'
+	var getYMD1 = '2025/7/31';
+	var getYMD2 = '2025/7/1';
+	PageInit(document.F);
+	function PageInit(obj)
+	{	//在 BODY onLoad 時候的初始化
+		ShowYear(obj.Y1,'2026/8/22',1,'N');
+		ShowYear(obj.Y2,'2026/8/22',1,'N');
+		SetOptionValue(obj.M1,1,12);
+		SetOptionValue(obj.M2,1,12);
+		//設定初始值
+		var YMDary1,Hary1;
+		if (getYMD1.indexOf(' ') > -1 ) {
+			YMDary1 = getYMD1.split(' ')[0].split('/');
+		}else {
+			YMDary1 = getYMD1.split('/');
+		}
+		SetFocus(obj.Y1,YMDary1[0]);
+		SetFocus(obj.M1,YMDary1[1]);
+		var YMDary2,Hary2;
+		if (getYMD2.indexOf(' ') > -1 ) {
+			YMDary2 = getYMD2.split(' ')[0].split('/');
+		}else {
+			YMDary2 = getYMD2.split('/');
+		}
+		SetFocus(obj.Y2,YMDary2[0]);
+		SetFocus(obj.M2,YMDary2[1]);
+		SetMonthDate(obj.Y1,obj.M1,obj.D1);
+		SetMonthDate(obj.Y2,obj.M2,obj.D2);
+		SetFocus(obj.D2,YMDary2[2]);
+		SetFocus(obj.D1,YMDary1[2]);
+		removeToday(obj.Y1,obj.M1,obj.D1,toDay);
+		removeToday(obj.Y2,obj.M2,obj.D2,toDay);
+	}
+	function CheckDate()
+	{
+		var Frm = document.F;
+		var y1 = parseInt(Frm.Y1.options[Frm.Y1.selectedIndex].value);
+		var m1 = parseInt(Frm.M1.options[Frm.M1.selectedIndex].value);
+		var d1 = parseInt(Frm.D1.options[Frm.D1.selectedIndex].value);
+		var y2 = parseInt(Frm.Y2.options[Frm.Y2.selectedIndex].value);
+		var m2 = parseInt(Frm.M2.options[Frm.M2.selectedIndex].value);
+		var d2 = parseInt(Frm.D2.options[Frm.D2.selectedIndex].value);
+		var sEDate = y1 + '-' + m1 + '-' + d1;
+		var sBDate = y2 + '-' + m2 + '-' + d2;
+		Frm.bDate.value = sBDate;
+		Frm.eDate.value = sEDate;
+		return checkBEdate(sBDate,sEDate);
+	}
+	function checkBEdate(sBDate,sEDate)
+	{
+		var aymd1 = sBDate.split(' ')[0].split('-');
+		var aymd2 = sEDate.split(' ')[0].split('-');
+		if (aymd1.length < 3 || aymd2.length < 3 ) {
+			alert ('日期選擇錯誤!!');
+			return false;
+		}
+		var nbdate = parseInt(aymd1[0])*1000000 + parseInt(aymd1[1])*10000 + parseInt(aymd1[2])*100;
+		var nedate = parseInt(aymd2[0])*1000000 + parseInt(aymd2[1])*10000 + parseInt(aymd2[2])*100;
+		if (nbdate > nedate) {
+			alert('您所輸入的起始日期大於結束日期');
+			return false;
+		}
+		return true;
+	}
+//--></SCRIPT>
+<INPUT type="button" name="BB" value="查詢" onclick="javascript:goC();">
+</td></tr>
+<tr id="oScrollHead"><td class="t12" colspan="11" style="text-align:right;">
+<span style='color:#ff0000;'>(自設區間僅提供一年內查詢)</span>
+</td></tr>
+<tr id="oScrollMenu" align="center">
+<td class="t2" nowrap>&nbsp;</td>
+<td class="t2" colspan=4 nowrap>買賣超</td>
+<td class="t2" colspan=4 nowrap>估計持股</td>
+<td class="t2" colspan=2 nowrap>持股比重</td>
+</tr>
+<tr id="oScrollMenu" align="center">
+<td class="t2" nowrap>日期</td>
+<td class="t2" nowrap>外資</td>
+<td class="t2" nowrap>投信</td>
+<td class="t2" nowrap>自營商</td>
+<td class="t2" nowrap>單日合計</td>
+<td class="t2" nowrap>外資</td>
+<td class="t2" nowrap>投信</td>
+<td class="t2" nowrap>自營商</td>
+<td class="t2" nowrap>單日合計</td>
+<td class="t2" nowrap>外資</td>
+<td class="t2" nowrap>三大法人</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/31</td>
+<td class="t3n1" nowrap>9,040</td>
+<td class="t3r1" nowrap>-1,293</td>
+<td class="t3n1" nowrap>1,612</td>
+<td class="t3n1" nowrap>9,359</td>
+<td class="t3n1" nowrap>19,072,941</td>
+<td class="t3n1" nowrap>618,021</td>
+<td class="t3n1" nowrap>225,275</td>
+<td class="t3n1" nowrap>19,916,237</td>
+<td class="t3n1" nowrap>73.54%</td>
+<td class="t3n1" nowrap>76.79%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/30</td>
+<td class="t3n1" nowrap>12,832</td>
+<td class="t3r1" nowrap>-352</td>
+<td class="t3n1" nowrap>592</td>
+<td class="t3n1" nowrap>13,072</td>
+<td class="t3n1" nowrap>19,064,189</td>
+<td class="t3n1" nowrap>619,314</td>
+<td class="t3n1" nowrap>223,663</td>
+<td class="t3n1" nowrap>19,907,166</td>
+<td class="t3n1" nowrap>73.51%</td>
+<td class="t3n1" nowrap>76.76%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/29</td>
+<td class="t3n1" nowrap>574</td>
+<td class="t3r1" nowrap>-465</td>
+<td class="t3n1" nowrap>225</td>
+<td class="t3n1" nowrap>334</td>
+<td class="t3n1" nowrap>19,051,357</td>
+<td class="t3n1" nowrap>619,666</td>
+<td class="t3n1" nowrap>223,071</td>
+<td class="t3n1" nowrap>19,894,094</td>
+<td class="t3n1" nowrap>73.46%</td>
+<td class="t3n1" nowrap>76.71%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/28</td>
+<td class="t3n1" nowrap>2,430</td>
+<td class="t3r1" nowrap>-329</td>
+<td class="t3n1" nowrap>458</td>
+<td class="t3n1" nowrap>2,559</td>
+<td class="t3n1" nowrap>19,050,236</td>
+<td class="t3n1" nowrap>620,131</td>
+<td class="t3n1" nowrap>222,846</td>
+<td class="t3n1" nowrap>19,893,213</td>
+<td class="t3n1" nowrap>73.46%</td>
+<td class="t3n1" nowrap>76.71%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/25</td>
+<td class="t3n1" nowrap>4,913</td>
+<td class="t3r1" nowrap>-1,367</td>
+<td class="t3r1" nowrap>-221</td>
+<td class="t3n1" nowrap>3,325</td>
+<td class="t3n1" nowrap>19,047,806</td>
+<td class="t3n1" nowrap>620,460</td>
+<td class="t3n1" nowrap>222,388</td>
+<td class="t3n1" nowrap>19,890,654</td>
+<td class="t3n1" nowrap>73.45%</td>
+<td class="t3n1" nowrap>76.70%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/24</td>
+<td class="t3n1" nowrap>1,151</td>
+<td class="t3r1" nowrap>-468</td>
+<td class="t3n1" nowrap>148</td>
+<td class="t3n1" nowrap>831</td>
+<td class="t3n1" nowrap>19,042,881</td>
+<td class="t3n1" nowrap>621,827</td>
+<td class="t3n1" nowrap>222,609</td>
+<td class="t3n1" nowrap>19,887,317</td>
+<td class="t3n1" nowrap>73.43%</td>
+<td class="t3n1" nowrap>76.69%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/23</td>
+<td class="t3r1" nowrap>-571</td>
+<td class="t3r1" nowrap>-641</td>
+<td class="t3n1" nowrap>2,247</td>
+<td class="t3n1" nowrap>1,035</td>
+<td class="t3n1" nowrap>19,042,677</td>
+<td class="t3n1" nowrap>622,295</td>
+<td class="t3n1" nowrap>222,461</td>
+<td class="t3n1" nowrap>19,887,433</td>
+<td class="t3n1" nowrap>73.43%</td>
+<td class="t3n1" nowrap>76.69%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/22</td>
+<td class="t3n1" nowrap>4,360</td>
+<td class="t3r1" nowrap>-935</td>
+<td class="t3n1" nowrap>363</td>
+<td class="t3n1" nowrap>3,788</td>
+<td class="t3n1" nowrap>19,043,236</td>
+<td class="t3n1" nowrap>622,936</td>
+<td class="t3n1" nowrap>220,214</td>
+<td class="t3n1" nowrap>19,886,386</td>
+<td class="t3n1" nowrap>73.43%</td>
+<td class="t3n1" nowrap>76.68%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/21</td>
+<td class="t3n1" nowrap>2,154</td>
+<td class="t3n1" nowrap>166</td>
+<td class="t3r1" nowrap>-234</td>
+<td class="t3n1" nowrap>2,086</td>
+<td class="t3n1" nowrap>19,038,828</td>
+<td class="t3n1" nowrap>554,985</td>
+<td class="t3n1" nowrap>219,850</td>
+<td class="t3n1" nowrap>19,813,663</td>
+<td class="t3n1" nowrap>73.41%</td>
+<td class="t3n1" nowrap>76.40%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/18</td>
+<td class="t3n1" nowrap>19,294</td>
+<td class="t3r1" nowrap>-214</td>
+<td class="t3n1" nowrap>283</td>
+<td class="t3n1" nowrap>19,363</td>
+<td class="t3n1" nowrap>19,036,314</td>
+<td class="t3n1" nowrap>554,819</td>
+<td class="t3n1" nowrap>220,084</td>
+<td class="t3n1" nowrap>19,811,217</td>
+<td class="t3n1" nowrap>73.40%</td>
+<td class="t3n1" nowrap>76.39%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/17</td>
+<td class="t3r1" nowrap>-2,765</td>
+<td class="t3r1" nowrap>-23</td>
+<td class="t3n1" nowrap>1,868</td>
+<td class="t3r1" nowrap>-920</td>
+<td class="t3n1" nowrap>19,010,665</td>
+<td class="t3n1" nowrap>555,032</td>
+<td class="t3n1" nowrap>219,801</td>
+<td class="t3n1" nowrap>19,785,498</td>
+<td class="t3n1" nowrap>73.30%</td>
+<td class="t3n1" nowrap>76.29%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/16</td>
+<td class="t3n1" nowrap>11,347</td>
+<td class="t3n1" nowrap>128</td>
+<td class="t3n1" nowrap>277</td>
+<td class="t3n1" nowrap>11,752</td>
+<td class="t3n1" nowrap>19,013,484</td>
+<td class="t3n1" nowrap>555,055</td>
+<td class="t3n1" nowrap>217,933</td>
+<td class="t3n1" nowrap>19,786,472</td>
+<td class="t3n1" nowrap>73.31%</td>
+<td class="t3n1" nowrap>76.29%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/15</td>
+<td class="t3n1" nowrap>9,925</td>
+<td class="t3r1" nowrap>-82</td>
+<td class="t3n1" nowrap>913</td>
+<td class="t3n1" nowrap>10,756</td>
+<td class="t3n1" nowrap>19,002,138</td>
+<td class="t3n1" nowrap>554,927</td>
+<td class="t3n1" nowrap>217,656</td>
+<td class="t3n1" nowrap>19,774,721</td>
+<td class="t3n1" nowrap>73.27%</td>
+<td class="t3n1" nowrap>76.25%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/14</td>
+<td class="t3n1" nowrap>1,151</td>
+<td class="t3r1" nowrap>-152</td>
+<td class="t3r1" nowrap>-1,940</td>
+<td class="t3r1" nowrap>-941</td>
+<td class="t3n1" nowrap>18,991,745</td>
+<td class="t3n1" nowrap>555,009</td>
+<td class="t3n1" nowrap>216,743</td>
+<td class="t3n1" nowrap>19,763,497</td>
+<td class="t3n1" nowrap>73.23%</td>
+<td class="t3n1" nowrap>76.21%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/11</td>
+<td class="t3n1" nowrap>4,265</td>
+<td class="t3r1" nowrap>-1,194</td>
+<td class="t3n1" nowrap>29</td>
+<td class="t3n1" nowrap>3,100</td>
+<td class="t3n1" nowrap>18,990,578</td>
+<td class="t3n1" nowrap>555,161</td>
+<td class="t3n1" nowrap>218,683</td>
+<td class="t3n1" nowrap>19,764,422</td>
+<td class="t3n1" nowrap>73.23%</td>
+<td class="t3n1" nowrap>76.21%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/10</td>
+<td class="t3n1" nowrap>5,901</td>
+<td class="t3r1" nowrap>-1,300</td>
+<td class="t3r1" nowrap>-569</td>
+<td class="t3n1" nowrap>4,032</td>
+<td class="t3n1" nowrap>18,986,312</td>
+<td class="t3n1" nowrap>556,355</td>
+<td class="t3n1" nowrap>218,654</td>
+<td class="t3n1" nowrap>19,761,321</td>
+<td class="t3n1" nowrap>73.21%</td>
+<td class="t3n1" nowrap>76.20%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/09</td>
+<td class="t3n1" nowrap>807</td>
+<td class="t3r1" nowrap>-71</td>
+<td class="t3n1" nowrap>38</td>
+<td class="t3n1" nowrap>774</td>
+<td class="t3n1" nowrap>18,980,167</td>
+<td class="t3n1" nowrap>557,655</td>
+<td class="t3n1" nowrap>219,223</td>
+<td class="t3n1" nowrap>19,757,045</td>
+<td class="t3n1" nowrap>73.19%</td>
+<td class="t3n1" nowrap>76.19%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/08</td>
+<td class="t3r1" nowrap>-284</td>
+<td class="t3r1" nowrap>-352</td>
+<td class="t3n1" nowrap>955</td>
+<td class="t3n1" nowrap>319</td>
+<td class="t3n1" nowrap>18,980,162</td>
+<td class="t3n1" nowrap>557,726</td>
+<td class="t3n1" nowrap>219,185</td>
+<td class="t3n1" nowrap>19,757,073</td>
+<td class="t3n1" nowrap>73.19%</td>
+<td class="t3n1" nowrap>76.19%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/07</td>
+<td class="t3r1" nowrap>-380</td>
+<td class="t3r1" nowrap>-8</td>
+<td class="t3n1" nowrap>367</td>
+<td class="t3r1" nowrap>-21</td>
+<td class="t3n1" nowrap>18,980,988</td>
+<td class="t3n1" nowrap>558,077</td>
+<td class="t3n1" nowrap>218,230</td>
+<td class="t3n1" nowrap>19,757,295</td>
+<td class="t3n1" nowrap>73.19%</td>
+<td class="t3n1" nowrap>76.18%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/04</td>
+<td class="t3n1" nowrap>597</td>
+<td class="t3n1" nowrap>80</td>
+<td class="t3n1" nowrap>60</td>
+<td class="t3n1" nowrap>737</td>
+<td class="t3n1" nowrap>18,977,019</td>
+<td class="t3n1" nowrap>558,085</td>
+<td class="t3n1" nowrap>217,863</td>
+<td class="t3n1" nowrap>19,752,967</td>
+<td class="t3n1" nowrap>73.17%</td>
+<td class="t3n1" nowrap>76.16%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/03</td>
+<td class="t3n1" nowrap>4,547</td>
+<td class="t3r1" nowrap>-73</td>
+<td class="t3n1" nowrap>311</td>
+<td class="t3n1" nowrap>4,785</td>
+<td class="t3n1" nowrap>18,972,169</td>
+<td class="t3n1" nowrap>558,005</td>
+<td class="t3n1" nowrap>217,803</td>
+<td class="t3n1" nowrap>19,747,977</td>
+<td class="t3n1" nowrap>73.15%</td>
+<td class="t3n1" nowrap>76.14%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/02</td>
+<td class="t3n1" nowrap>864</td>
+<td class="t3r1" nowrap>-240</td>
+<td class="t3r1" nowrap>-284</td>
+<td class="t3n1" nowrap>340</td>
+<td class="t3n1" nowrap>18,967,372</td>
+<td class="t3n1" nowrap>558,078</td>
+<td class="t3n1" nowrap>217,492</td>
+<td class="t3n1" nowrap>19,742,942</td>
+<td class="t3n1" nowrap>73.14%</td>
+<td class="t3n1" nowrap>76.13%</td>
+</tr>
+<tr>
+<td class="t3n0" nowrap>114/07/01</td>
+<td class="t3n1" nowrap>17,472</td>
+<td class="t3r1" nowrap>-205</td>
+<td class="t3n1" nowrap>624</td>
+<td class="t3n1" nowrap>17,891</td>
+<td class="t3n1" nowrap>18,966,207</td>
+<td class="t3n1" nowrap>558,318</td>
+<td class="t3n1" nowrap>217,776</td>
+<td class="t3n1" nowrap>19,742,301</td>
+<td class="t3n1" nowrap>73.13%</td>
+<td class="t3n1" nowrap>76.12%</td>
+</tr>
+<tr id="oScrollFoot">
+<td class="t3n0" nowrap>合計買賣超</td>
+<td class="t3n1" nowrap>109,624</td>
+<td class="t3r1" nowrap>-9,390</td>
+<td class="t3n1" nowrap>8,122</td>
+<td class="t3n1" nowrap>108,356</td>
+<td class="t3n1" nowrap colspan=6>&nbsp;</td>
+</tr>
+</table>
+</td></tr></table>
+</form>
+<script language="javascript"><!--
+function goA()
+{
+	var i = document.F.D.selectedIndex;
+	i = document.F.D.options[i].value;
+	if (i > 0) {
+		window.location.href = '/z/zc/zcl/zcl.djhtm?a=2330&b='+i ;
+	}
+}
+function goC()
+{
+	if (CheckDate()) {
+		if(checkDateDur(document.F.bDate.value)) {
+			var bDate = document.F.bDate.value;		//起始日期 
+			var eDate = document.F.eDate.value;		//結束日期 
+			sURL = '/z/zc/zcl/zcl.djhtm?a=2330&c=' + bDate + '&d=' + eDate ;
+			window.location.href = sURL;
+		}
+	}
+}
+//--></script>
+<table border="0" width=628><tr><td class="t3t1">註：</td></tr><tr><td class="t3t1">１. 外資持股數，除了每日買賣超外，海外公司債轉換普通股、存託憑證發行或兌回普通股、外資配認股數、外資原始股東出售股數、借券、ETF異動等因素也會影響持股數，若兩日間的持股數異動較大，請至<a href="http://www.tse.com.tw" target="_blank">台灣證券交易所</a>與<a href="http://www.otc.org.tw" target="_blank">證券櫃檯買賣中心</a>查詢異動原因。</td></tr><tr><td class="t3t1">２. 持股比重中的「外資」及「三大法人」算式：<BR>外資的持股比重為全體外資持股比率，等於「全體外資持有股數」除以「發行股數」。三大法人的持股比重，為「外資持股比重+(投信與自營商持股佔發行張數的比例)」。</td></tr><tr><td class="t3t1">３. 投信估計庫存，除了依每日買賣超計算外，會利用投信投顧公會公告的基金季持股明細(或半年持股明細，視基金類型)進行個股投信的庫存數值調整（季末的持股值可能會與前一日會有較大的落差）。<BR>估算公式為：季末估計庫存＝季末基金規模×持股比率÷季末當日股價。</td></tr><tr><td class="t3t1">４. 交易所並未公告自營商與投信持股庫存，本表所列數值，皆為估計值，僅供參考，本公司不負任何法律責任，投資人若依此以為買賣依據，須自負盈虧之責。</td></tr><tr><td class="t3t1">５. 上市個股的外資數值自2017/12/18起指「外陸資(不含自營商)」。</td></tr></table>
+
+<SCRIPT LANGUAGE=javascript>
+<!--
+    var $DJWebGraph1;
+    var sRenderTo = 'SysJustWebGraphDIV';
+	var dataCount = 0;
+    
+    $(document).ready(function () {
+        if (!!$DJWebGraph) {
+			$DJWebGraph1 = new $DJWebGraph();
+			$DJWebGraph1.CallBack = GetBcdData;	
+        	
+            $DJWebGraph1.CreateGraphObject({
+					'CanvasClass': 'canvas', //表示為複合式圖形
+					'ID': 'ZCL3',
+					'Width': '600',
+					'Height': '350',
+					'RenderTo': sRenderTo,
+					'Type': [['Trade:R'],['Trade:L','Bar'],['Trade:L','Bar'],['Trade:L','Bar']],
+					'Title': [['台積電股價'], ['外資持股', '外資買賣超'], ['投信持股', '投信買賣超'], ['自營商持股', '自營商買賣超']],
+					'Unit': [['元'],['張'],['張'],['張']],
+					'LineColor': [['0089E9'], ['FF00FF', '13B5B1'], ['8FC31F', '00D2FF'], ['FF1868', '996C33']],
+					'BgColor': 'FFFFFF',
+					'Mark': 'none',
+					'BCDUrl': '/Z/ZC/ZCL/CZCL3.DJBCD?A=2330&B=Y'
+            });
+			
+			$DJWebGraph1.GraphObj.setDrawCall(function() {
+				// base 0
+				$DJWebGraph1.GraphObj.moveTip(dataCount - 1);
+			});
+        }
+	});
+		
+    function GetBcdData(data) {
+        if (!!data.length) {
+            var arrData = data.split(' ');
+            var X = arrData[0];
+            var ArrY = [
+				[arrData[1]],
+                [arrData[2], arrData[5]],
+				[arrData[3], arrData[6]],
+                [arrData[4], arrData[7]]
+			];
+			dataCount = X.length;
+
+            $DJWebGraph1.SetGraphBcd({ 'X': X, 'Y': ArrY });
+        }
+    }
+//-->
+</SCRIPT>
+<script language="javascript"><!--
+if(typeof(ContentCenterEnd) == 'function'){ 	ContentCenterEnd();
+ } 
+//--></script>
+</td><td valign="top" align="right">
+<script language="javascript" src="/z/js/SR.js"></script>
+</td></tr>
+<tr><td colspan="3" valign="top">
+<script language="javascript" src="/z/js/SD.js"></script>
+</td></tr></table>
+</div>
+</body>
+</html>
+
+<script language="JavaScript"><!--
+	function changeStkID() {
+		var sUrl;
+		var i = document.F.D.options[document.F.D.selectedIndex].value;
+		if (CheckDate()) {
+			var bDate = document.F.bDate.value;		//起始日期
+			var eDate = document.F.eDate.value;		//結束日期
+		}
+		stk = document.F.stk.options[document.F.stk.selectedIndex].value;
+		if (i>0)
+			sUrl = '/z/zc/zcl/zcl.djhtm?a=' + stk + '&b=' + i ;
+		else
+			sUrl = '/z/zc/zcl/zcl.djhtm?a=' + stk + '&b=' + i + '&c=' + bDate + '&d=' + eDate;
+		self.location = sUrl;
+	}
+
+	function checkDateDur(dd) {
+		var now = new Date();
+		yearAgo = (now.getFullYear() - 1) * 10000 + (now.getMonth() + 1) * 100 + now.getDate() ;
+		//alert('yearAgo = ' + yearAgo);
+
+		daray = dd.split('-');
+		if (daray[1] < 10) { daray[1] = '0' + daray[1] }
+		if (daray[2] < 10) { daray[2] = '0' + daray[2] }
+
+		var Edate = daray[0] + daray[1] + daray[2];
+
+		//alert('Edate = ' + Edate);
+		if (Edate < yearAgo){
+				alert('僅提供一年內查詢。');
+				return false;
+			}
+		else
+			return true;
+	}
+
+// --></script>
