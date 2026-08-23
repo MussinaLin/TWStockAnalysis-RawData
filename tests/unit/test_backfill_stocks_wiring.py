@@ -204,5 +204,62 @@ def test_per_symbol_and_batch_agree_on_same_row(monkeypatch) -> None:
         assert abs(batch_row[col] - per_symbol_row[col]) <= 1, col
 
 
+def test_per_symbol_range_provider_fetches_holding_pct_once_per_symbol(
+    monkeypatch,
+) -> None:
+    """Finding 1 回歸測試：三大法人與外資/法人持股佔比來自同一次 MoneyDJ zcl
+    fetch —— `PerSymbolRangeProvider.build` 對每檔只能呼叫一次
+    `fetch_moneydj_holding_pct`，不能為了兩種資料各打一次。
+
+    同時驗證 `provider.holding_pct_cache` 的形狀與內容能直接餵給
+    `_build_daily_rows`，回傳的列上看得到持股佔比欄位。
+    """
+    calls: dict[str, int] = {}
+
+    def _fake_holding_pct(session, symbol, start, end):  # noqa: ANN001 - 測試替身
+        calls[symbol] = calls.get(symbol, 0) + 1
+        return pd.DataFrame({
+            "date": ["114/07/31"],
+            "foreign_net_lots": ["9040"], "trust_net_lots": ["-1293"],
+            "dealer_net_lots": ["1612"],
+            "foreign_holding_pct": ["73.54%"], "insti_holding_pct": ["76.79%"],
+        })
+
+    monkeypatch.setattr(run, "fetch_moneydj_holding_pct", _fake_holding_pct)
+    monkeypatch.setattr(run, "fetch_twse_stock_day", lambda *a, **k: pd.DataFrame(
+        [["114/07/31", "24,000,000", "30,000,000", "1250.00", "1260.00",
+          "1245.00", "1255.00", "-5.00", "50,000", ""]],
+        columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價",
+                 "收盤價", "漲跌價差", "成交筆數", "註記"],
+    ))
+
+    provider = run.PerSymbolRangeProvider.build(
+        session=None,
+        symbols=["2330", "2317"],
+        market_types={"2330": "twse", "2317": "twse"},
+        start=dt.date(2025, 7, 1),
+        end=dt.date(2025, 7, 31),
+    )
+
+    # 每檔恰好 1 次，不是 2 次（三大法人 + 持股佔比各一次）。
+    assert calls == {"2330": 1, "2317": 1}
+
+    holdings = pd.DataFrame([
+        {"symbol": "2330", "market_type": "twse"},
+        {"symbol": "2317", "market_type": "twse"},
+    ])
+    output_df = run._build_daily_rows(
+        date=dt.date(2025, 7, 31),
+        holdings=holdings,
+        provider=provider,
+        holding_pct_cache=provider.holding_pct_cache,
+    )
+
+    assert len(output_df) == 2
+    for _, row in output_df.iterrows():
+        assert row["foreign_holding_pct"] == pytest.approx(0.7354)
+        assert row["insti_holding_pct"] == pytest.approx(0.7679)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -848,8 +848,8 @@ class PerSymbolRangeProvider:
 
     建構時把整段區間的資料一次抓完，之後全部是記憶體查表、零 HTTP：
     - OHLCV + change：逐月抓 TWSE STOCK_DAY / TPEX 個股月表（每檔每月 1 發）
-    - 三大法人：MoneyDJ zcl，**整段只打 1 發**（該頁同時含持股比重，
-      所以三大法人是零額外請求）
+    - 三大法人 + 外資/法人持股佔比：MoneyDJ zcl，**整段只打 1 發**——兩者從同一次
+      fetch 回來的同一份 HTML 解析出來（見 `build()`），持股佔比因此零額外請求。
 
     單位契約與 BatchSourceProvider 相同：`ohlcv().volume` 與 `insti()` 一律回「股」。
     per-symbol 來源給的是「張」，已在 `expand_tpex_stock_day` /
@@ -863,11 +863,17 @@ class PerSymbolRangeProvider:
         insti_by_symbol: dict[str, dict[dt.date, tuple[int | None, int | None, int | None]]],
         insti_ok_by_symbol: dict[str, bool],
         resolved_market_types: dict[str, str],
+        holding_pct_cache: dict[str, dict[dt.date, dict]],
     ) -> None:
         self._ohlcv = ohlcv_by_symbol
         self._insti = insti_by_symbol
         self._insti_ok = insti_ok_by_symbol
         self.resolved_market_types = resolved_market_types
+        # 外資/法人持股佔比：與三大法人在 build() 內同一次 MoneyDJ zcl fetch 解析出來。
+        # 形狀對齊 `_prefetch_holding_pct_cache` 的回傳值（symbol -> date -> dict），
+        # 呼叫端直接拿去當 `_build_daily_rows` 的 holding_pct_cache 用即可——
+        # **不要**再呼叫 `_prefetch_holding_pct_cache`，那會是對同一頁的第二次請求。
+        self.holding_pct_cache = holding_pct_cache
 
     @classmethod
     def build(
@@ -878,26 +884,29 @@ class PerSymbolRangeProvider:
         start: dt.date,
         end: dt.date,
     ) -> PerSymbolRangeProvider:
-        """對每檔預取整段的 OHLCV 與三大法人。
+        """對每檔預取整段的 OHLCV、三大法人與持股佔比。
 
-        先抓 MoneyDJ（整段 1 發），再用它產出的日期集合當「該檔哪些日子有交易」的
-        外部證據，交給 `_prefetch_symbol_ohlcv` 區分「月表回空」是沒交易還是被限流。
-        順序不可對調。
+        先抓 MoneyDJ（整段 1 發，同一份 HTML 同時解析出三大法人與持股佔比），
+        再用三大法人的日期集合當「該檔哪些日子有交易」的外部證據，交給
+        `_prefetch_symbol_ohlcv` 區分「月表回空」是沒交易還是被限流。順序不可對調。
         """
         ohlcv_by_symbol: dict[str, dict[dt.date, OhlcvResult]] = {}
         insti_by_symbol: dict[str, dict[dt.date, tuple]] = {}
         insti_ok_by_symbol: dict[str, bool] = {}
+        holding_pct_by_symbol: dict[str, dict[dt.date, dict]] = {}
         resolved: dict[str, str] = {}
 
         total = len(symbols)
         for idx, symbol in enumerate(symbols, start=1):
             print(f"  預取個股區間資料 {idx}/{total} {symbol}")
 
-            # 1) MoneyDJ zcl：三大法人（整段 1 發，與持股比重同一頁）
+            # 1) MoneyDJ zcl：三大法人 + 持股佔比（整段 1 發，同一頁 HTML 解析兩份）
             insti_map: dict[dt.date, tuple] = {}
+            holding_pct_map: dict[dt.date, dict] = {}
             insti_ok = False
             try:
                 raw = fetch_moneydj_holding_pct(session, symbol, start, end)
+
                 insti_df = prepare_moneydj_insti(raw)
                 for _, row in insti_df.iterrows():
                     row_date = row["date"]
@@ -908,12 +917,24 @@ class PerSymbolRangeProvider:
                         row.get("trust_net"),
                         row.get("dealer_net"),
                     )
+
+                holding_pct_df = prepare_moneydj_holding_pct(raw)
+                for _, row in holding_pct_df.iterrows():
+                    row_date = row["date"]
+                    if not isinstance(row_date, dt.date):
+                        continue
+                    holding_pct_map[row_date] = {
+                        "foreign_holding_pct": row.get("foreign_holding_pct"),
+                        "insti_holding_pct": row.get("insti_holding_pct"),
+                    }
+
                 insti_ok = True
             except (DataUnavailableError, requests.RequestException) as exc:
                 print(f"    {symbol} MoneyDJ 三大法人取得失敗：{exc}")
 
             insti_by_symbol[symbol] = insti_map
             insti_ok_by_symbol[symbol] = insti_ok
+            holding_pct_by_symbol[symbol] = holding_pct_map
 
             # 2) 月表：OHLCV + change（每月 1 發），用 MoneyDJ 日期當限流判準
             fetched = _prefetch_symbol_ohlcv(
@@ -936,6 +957,7 @@ class PerSymbolRangeProvider:
             insti_by_symbol=insti_by_symbol,
             insti_ok_by_symbol=insti_ok_by_symbol,
             resolved_market_types=resolved,
+            holding_pct_cache=holding_pct_by_symbol,
         )
 
     def ohlcv(
@@ -2310,15 +2332,15 @@ def _main_inner(
         margin_cache = _prefetch_margin_cache(
             session, margin_holdings, start_date, end_date
         )
-        holding_pct_cache = _prefetch_holding_pct_cache(
-            session, margin_holdings, start_date, end_date,
-        )
         # 處置名單整段預取一次（兩市場各 1 次 HTTP），避免每天各打一次。
         with _phase("預取處置股名單"):
             disposition = _fetch_disposition(session, start_date, end_date)
 
         # per-stock 區間來源：OHLCV 每檔每月 1 發、三大法人每檔整段 1 發。
         # 取代原本「每個交易日 4 發全市場批次」的成本結構。
+        # 三大法人與外資/法人持股佔比來自同一次 MoneyDJ zcl fetch（見
+        # PerSymbolRangeProvider.build），故**不再**呼叫 _prefetch_holding_pct_cache
+        # ——那會是對同一頁的第二次請求，直接沿用 provider 解析好的結果即可。
         with _phase("預取個股區間 OHLCV／三大法人"):
             provider = PerSymbolRangeProvider.build(
                 session=session,
@@ -2327,6 +2349,7 @@ def _main_inner(
                 start=start_date,
                 end=end_date,
             )
+        holding_pct_cache = provider.holding_pct_cache
 
         # 用探測定調後的市場別組 holdings，讓處置註記與 gating 拿到正確市場別。
         stocks_holdings = pd.DataFrame([

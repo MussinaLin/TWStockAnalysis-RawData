@@ -168,6 +168,11 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 
 ### OHLCV 來源順序（逐檔請求最小化）
 
+> 本節只適用於 **daily 模式與一般日期區間回補**（`BatchSourceProvider`，走
+> `_fetch_ohlcv_with_fallback`）。`--backfill-stocks` 走完全不同的
+> `PerSymbolRangeProvider`，不會進到這條 fallback 鏈，見上面「回補特定股票
+> （--backfill-stocks）」一節。
+
 `_fetch_ohlcv_with_fallback` 的 fallback 鏈是：
 
 ```
@@ -180,10 +185,13 @@ STOCK_DAY_ALL → MI_INDEX → TPEX quotes → STOCK_DAY 月表
 
 - **上櫃股（`stocks.market_type = 'tpex'`）完全跳過 `STOCK_DAY`。** 那支 API 只有上市
   資料，對上櫃代號必定回「很抱歉，沒有符合條件的資料!」，打了純粹消耗限流配額。
-- `market_type` 未知（`NULL`，或 `--backfill-stocks` 查不到該代號）時維持既有行為往下
-  打，不誤殺。`--backfill-stocks` 會另外查 DB 補上市場別。
+- `market_type` 未知（`NULL`）時維持既有行為往下打，不誤殺。
 - `market_type` 欄由下游 TWStockAnalysis repo 維護，本 repo 只讀不寫；`db.py` 只保留
   `ADD COLUMN IF NOT EXISTS` 讓全新 DB 也建得起來。
+
+`--backfill-stocks` 對市場別未知（DB 查不到該代號）的處理方式不同：`PerSymbolRangeProvider`
+（見 `_prefetch_symbol_ohlcv`）用第一個抓到資料的月份定調——先試 TWSE STOCK_DAY，
+回空再試 TPEX 個股月表，之後整段沿用該市場別；不會經過上面這條 fallback 鏈。
 
 **為什麼順序重要**：`STOCK_DAY` 原本排在 `MI_INDEX` 前面，只要 `STOCK_DAY_ALL` 沒補滿
 五個欄位就會觸發。2026-08-19 它「無法解析日期」而整批棄用，結果 217 檔全部各打一次
