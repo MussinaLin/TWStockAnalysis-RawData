@@ -408,6 +408,19 @@ def prepare_tpex_issued_shares(df: pd.DataFrame) -> pd.DataFrame:
     return result.dropna(subset=["issued_shares"])
 
 
+def _int_col_or_nulls(df: pd.DataFrame, cols: dict, col_name: str) -> pd.Series:
+    """取出某個標準欄位並轉整數；該欄未對應到來源欄位時回一整排 None。
+
+    兩個融資融券 normalize（TWSE / TPEX）共用。cols 的值必定是 df 的真實欄位
+    或 None（TWSE 側來自 _find_columns、TPEX 側來自 df_cols_lower），故只需
+    檢查真假，不需要再 `in df.columns`。
+    """
+    src_col = cols.get(col_name)
+    if src_col:
+        return df[src_col].map(_clean_int)
+    return pd.Series([None] * len(df))
+
+
 def prepare_twse_margin(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare TWSE margin trading data into standard format.
 
@@ -434,23 +447,17 @@ def prepare_twse_margin(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame()
     result["symbol"] = df[symbol_col].astype(str).str.strip()
 
-    def _get_int_col(col_name: str) -> pd.Series:
-        src_col = cols.get(col_name)
-        if src_col:
-            return df[src_col].map(_clean_int)
-        return pd.Series([None] * len(df))
-
-    result["margin_buy"] = _get_int_col("margin_buy")
-    result["margin_sell"] = _get_int_col("margin_sell")
-    result["margin_balance"] = _get_int_col("margin_balance")
-    result["short_sell"] = _get_int_col("short_sell")
-    result["short_buy"] = _get_int_col("short_buy")
-    result["short_balance"] = _get_int_col("short_balance")
+    result["margin_buy"] = _int_col_or_nulls(df, cols, "margin_buy")
+    result["margin_sell"] = _int_col_or_nulls(df, cols, "margin_sell")
+    result["margin_balance"] = _int_col_or_nulls(df, cols, "margin_balance")
+    result["short_sell"] = _int_col_or_nulls(df, cols, "short_sell")
+    result["short_buy"] = _int_col_or_nulls(df, cols, "short_buy")
+    result["short_balance"] = _int_col_or_nulls(df, cols, "short_balance")
 
     # Calculate margin_change: buy - sell - cash_repay
-    margin_buy = _get_int_col("margin_buy")
-    margin_sell = _get_int_col("margin_sell")
-    margin_cash = _get_int_col("margin_cash_repay")
+    margin_buy = _int_col_or_nulls(df, cols, "margin_buy")
+    margin_sell = _int_col_or_nulls(df, cols, "margin_sell")
+    margin_cash = _int_col_or_nulls(df, cols, "margin_cash_repay")
 
     if margin_buy is not None and margin_sell is not None:
         margin_change = margin_buy - margin_sell
@@ -461,9 +468,9 @@ def prepare_twse_margin(df: pd.DataFrame) -> pd.DataFrame:
         result["margin_change"] = None
 
     # Calculate short_change: sell - buy - stock_repay
-    short_sell_raw = _get_int_col("short_sell")
-    short_buy_raw = _get_int_col("short_buy")
-    short_stock = _get_int_col("short_stock_repay")
+    short_sell_raw = _int_col_or_nulls(df, cols, "short_sell")
+    short_buy_raw = _int_col_or_nulls(df, cols, "short_buy")
+    short_stock = _int_col_or_nulls(df, cols, "short_stock_repay")
 
     if short_sell_raw is not None and short_buy_raw is not None:
         short_change = short_sell_raw - short_buy_raw
@@ -514,18 +521,12 @@ def prepare_tpex_margin(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame()
     result["symbol"] = df[symbol_col].astype(str).str.strip()
 
-    def _get_int_col(col_name: str) -> pd.Series:
-        src_col = cols.get(col_name)
-        if src_col:
-            return df[src_col].map(_clean_int)
-        return pd.Series([None] * len(df))
-
-    result["margin_buy"] = _get_int_col("margin_buy")
-    result["margin_sell"] = _get_int_col("margin_sell")
-    result["margin_balance"] = _get_int_col("margin_balance")
-    result["short_sell"] = _get_int_col("short_sell")
-    result["short_buy"] = _get_int_col("short_buy")
-    result["short_balance"] = _get_int_col("short_balance")
+    result["margin_buy"] = _int_col_or_nulls(df, cols, "margin_buy")
+    result["margin_sell"] = _int_col_or_nulls(df, cols, "margin_sell")
+    result["margin_balance"] = _int_col_or_nulls(df, cols, "margin_balance")
+    result["short_sell"] = _int_col_or_nulls(df, cols, "short_sell")
+    result["short_buy"] = _int_col_or_nulls(df, cols, "short_buy")
+    result["short_balance"] = _int_col_or_nulls(df, cols, "short_balance")
 
     # Calculate margin_change: buy - sell - cash_repay
     margin_buy_col = cols.get("margin_buy")
