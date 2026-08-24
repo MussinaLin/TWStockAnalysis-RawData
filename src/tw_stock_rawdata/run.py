@@ -1757,6 +1757,16 @@ def _fetch_month_ohlcv(
     }
 
 
+def _month_has_trading(month: dt.date, traded_dates: set[dt.date]) -> bool:
+    """該月在 MoneyDJ 的交易日集合裡是否有任何一天。
+
+    這是「月表回空到底是沒交易還是被限流」的唯一外部證據來源——
+    www.twse.com.tw 兩種情況回同一個字串，無法從回應本身區分
+    （見 memory/twse-rate-limit-ambiguous-response.md）。
+    """
+    return any(month <= d <= _month_end(month) for d in traded_dates)
+
+
 def _prefetch_symbol_ohlcv(
     session: requests.Session,
     symbol: str,
@@ -1807,39 +1817,56 @@ def _prefetch_symbol_ohlcv(
             print(f"    {symbol} {month:%Y-%m} {candidate} 月表請求失敗：{exc}")
             return {}, str(exc)
 
-    for month in _month_starts(start, end):
-        month_rows: dict[dt.date, OhlcvResult] = {}
-        reason = ""
+    def fetch_month_probing(month: dt.date):
+        """回傳 (該月資料, 失敗原因, 定調後的市場別)。
 
+        市場別未知時先 TWSE 後 TPEX，以先取得資料者定調；兩邊都空則維持未定調，
+        並沿用最後一次嘗試的原因字串。
+        """
+        if resolved is not None:
+            rows, reason = fetch_month(resolved, month)
+            return rows, reason, resolved
+        rows: dict[dt.date, OhlcvResult] = {}
+        reason = ""
+        for candidate in ("twse", "tpex"):
+            rows, reason = fetch_month(candidate, month)
+            if rows:
+                return rows, reason, candidate
+        return rows, reason, None
+
+    def rescue_from_other_market(month: dt.date):
+        """跨市場補救：該月這檔可能還在另一個市場（市場別轉換）。
+
+        只在「回空且 MoneyDJ 有交易」時才多打這一發，正常情況零成本。
+        不改變 resolved——它代表該檔現在屬於哪個市場，要寫回 holdings 供處置註記用。
+        """
         if resolved is None:
-            # 市場別未知：先 TWSE 後 TPEX，以先取得資料者定調。
-            for candidate in ("twse", "tpex"):
-                month_rows, reason = fetch_month(candidate, month)
-                if month_rows:
-                    resolved = candidate
-                    break
-        else:
-            month_rows, reason = fetch_month(resolved, month)
+            return None
+        other = "tpex" if resolved == "twse" else "twse"
+        rows, _ = fetch_month(other, month)
+        if not rows:
+            return None
+        print(
+            f"    {symbol} {month:%Y-%m} 改由 {other} 月表取得"
+            "（該月的市場別與 stocks.market_type 不同，應為市場別轉換）"
+        )
+        return rows
+
+    for month in _month_starts(start, end):
+        month_rows, reason, resolved = fetch_month_probing(month)
 
         if month_rows:
             by_date.update(month_rows)
             continue
 
         # 月表沒給東西 —— 是「沒交易」還是「被限流」？用 MoneyDJ 當外部證據。
-        if not any(month <= d <= _month_end(month) for d in traded_dates):
+        if not _month_has_trading(month, traded_dates):
             continue
 
-        # MoneyDJ 說該月有交易。先排除「該月這檔還在另一個市場」（市場別轉換）。
-        if resolved is not None:
-            other = "tpex" if resolved == "twse" else "twse"
-            month_rows, _ = fetch_month(other, month)
-            if month_rows:
-                print(
-                    f"    {symbol} {month:%Y-%m} 改由 {other} 月表取得"
-                    "（該月的市場別與 stocks.market_type 不同，應為市場別轉換）"
-                )
-                by_date.update(month_rows)
-                continue
+        rescued = rescue_from_other_market(month)
+        if rescued:
+            by_date.update(rescued)
+            continue
 
         failed_months.append(month)
         detail = f"（{reason}）" if reason else ""

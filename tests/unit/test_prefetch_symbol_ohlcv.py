@@ -404,3 +404,56 @@ def test_unknown_market_type_falls_back_to_tpex(monkeypatch) -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_unknown_market_type_both_empty_with_moneydj_trading_is_failure(monkeypatch) -> None:
+    """市場別未定調且兩市場月表皆回空，但 MoneyDJ 證明該月有交易 → 判定失敗。
+
+    這條路徑先前沒有測試：市場別探測兩邊都失敗時，resolved 維持 None，
+    跨市場補救因此無從進行（沒有「另一個市場」可試），只能記進 failed_months。
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(
+        run, "fetch_twse_stock_day",
+        lambda *a, **k: calls.append("twse")
+        or (_ for _ in ()).throw(DataUnavailableError("很抱歉，沒有符合條件的資料!")),
+    )
+    monkeypatch.setattr(
+        run, "fetch_tpex_stock_day",
+        lambda *a, **k: calls.append("tpex")
+        or (_ for _ in ()).throw(DataUnavailableError("很抱歉，沒有符合條件的資料!")),
+    )
+
+    out = run._prefetch_symbol_ohlcv(
+        session=None, symbol="2330", market_type=None,
+        start=dt.date(2025, 7, 1), end=dt.date(2025, 7, 31),
+        traded_dates={dt.date(2025, 7, 16)},
+    )
+
+    # 兩市場各試一次即止——未定調時不會再多打跨市場補救那一發
+    assert calls == ["twse", "tpex"]
+    assert out.market_type is None
+    assert out.failed_months == [dt.date(2025, 7, 1)]
+    assert out.by_date == {}
+
+
+def test_unknown_market_type_both_empty_without_moneydj_trading_is_silent(monkeypatch) -> None:
+    """同上但 MoneyDJ 也沒有該月交易 → 當成該檔那個月本來就沒交易，不算失敗。"""
+    monkeypatch.setattr(
+        run, "fetch_twse_stock_day",
+        lambda *a, **k: (_ for _ in ()).throw(DataUnavailableError("無資料")),
+    )
+    monkeypatch.setattr(
+        run, "fetch_tpex_stock_day",
+        lambda *a, **k: (_ for _ in ()).throw(DataUnavailableError("無資料")),
+    )
+
+    out = run._prefetch_symbol_ohlcv(
+        session=None, symbol="2330", market_type=None,
+        start=dt.date(2025, 7, 1), end=dt.date(2025, 7, 31),
+        traded_dates=set(),
+    )
+
+    assert out.market_type is None
+    assert out.failed_months == []
+    assert out.by_date == {}
