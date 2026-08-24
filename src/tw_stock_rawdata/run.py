@@ -1915,6 +1915,110 @@ def _print_backfill_stocks_summary(
         print("月表：沒有判定為取得失敗的月份")
 
 
+def _resolve_margin_sources(
+    session: requests.Session,
+    date: dt.date,
+    today: dt.date,
+    sheet_name: str,
+    holdings: pd.DataFrame,
+    margin_cache: dict[str, dict[dt.date, dict]] | None,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """取得當日的融資融券來源，回傳 (twse_margin, tpex_margin)。
+
+    三條互斥路徑：
+
+    1. `margin_cache` 已備（backfill 由呼叫端預取）→ 兩者都回 None，
+       `_build_daily_rows` 會直接查 cache。
+    2. `date == today` → 走全市場整批 API。TPEX 先試 V2（支援日期參數），
+       失敗或日期不符再退回 OpenAPI 快照。
+    3. 其餘（歷史單日回補，無 cache）→ 逐檔打 MoneyDJ，組成一張形狀等同
+       twse_margin 的表；失敗一律吞掉（融資融券非必要欄位，不 gating）。
+
+    各來源都嚴格驗資料日期 == 請求日期：TWSE 尚未發布時會回前一日的資料，
+    寫下去等於把 D-1 的值標成 D。缺值由 D+1 的 MoneyDJ 修正機制補。
+    """
+    if margin_cache is not None:
+        return None, None
+
+    if date != today:
+        return _fetch_margin_from_moneydj(session, date, holdings), None
+
+    return _fetch_margin_batch(session, date, sheet_name)
+
+
+def _fetch_margin_batch(
+    session: requests.Session,
+    date: dt.date,
+    sheet_name: str,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """當日模式：TWSE MI_MARGN 與 TPEX（V2 優先、OpenAPI 墊底）各抓一次整批。"""
+    twse_margin = None
+    try:
+        with _phase(f"{sheet_name} TWSE 融資融券"):
+            twse_margin_raw, twse_margin_date = fetch_twse_margin(session, date)
+        if twse_margin_date == date:
+            twse_margin = prepare_twse_margin(twse_margin_raw)
+        else:
+            print(f"{sheet_name} TWSE 融資融券日期不匹配：{twse_margin_date} != {date}")
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"{sheet_name} TWSE 融資融券取得失敗：{exc}")
+
+    tpex_margin = None
+    try:
+        with _phase(f"{sheet_name} TPEX 融資融券 V2"):
+            tpex_margin_raw, tpex_margin_date = fetch_tpex_margin_v2(session, date)
+        if tpex_margin_date is None or tpex_margin_date == date:
+            tpex_margin = prepare_tpex_margin_v2(tpex_margin_raw)
+        else:
+            print(f"{sheet_name} TPEX V2 融資融券日期不匹配：{tpex_margin_date} != {date}")
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"{sheet_name} TPEX V2 融資融券取得失敗：{exc}")
+
+    if tpex_margin is None:
+        try:
+            with _phase(f"{sheet_name} TPEX 融資融券 OpenAPI（V2 回退）"):
+                tpex_margin_raw, tpex_margin_date = fetch_tpex_margin(session)
+            if tpex_margin_date is None or tpex_margin_date == date:
+                tpex_margin = prepare_tpex_margin(tpex_margin_raw)
+            else:
+                print(
+                    f"{sheet_name} TPEX OpenAPI 融資融券日期不匹配："
+                    f"{tpex_margin_date} != {date}"
+                )
+        except (DataUnavailableError, requests.RequestException) as exc2:
+            print(f"{sheet_name} TPEX 融資融券取得失敗：{exc2}")
+
+    return twse_margin, tpex_margin
+
+
+def _fetch_margin_from_moneydj(
+    session: requests.Session,
+    date: dt.date,
+    holdings: pd.DataFrame,
+) -> pd.DataFrame | None:
+    """歷史單日回補（無 cache）：逐檔打 MoneyDJ，只取目標日那一列。
+
+    往前多抓 10 天是因為 MoneyDJ 的區間查詢對單日常回空；抓一小段再自己挑。
+    失敗一律靜默跳過——融資融券不納入 _stock_sources_ok，缺了不該讓整檔跳過。
+    回傳的表形狀等同 twse_margin，由呼叫端當成 TWSE 來源傳下去。
+    """
+    margin_rows = []
+    fetch_start = date - dt.timedelta(days=10)
+    for _, item in holdings.iterrows():
+        symbol = str(item["symbol"]).strip()
+        try:
+            moneydj_raw = fetch_moneydj_margin(session, symbol, fetch_start, date)
+            moneydj_df = prepare_moneydj_margin(moneydj_raw)
+            row = moneydj_df.loc[moneydj_df["date"] == date]
+            if not row.empty:
+                row_data = row.iloc[0].to_dict()
+                row_data["symbol"] = symbol
+                margin_rows.append(row_data)
+        except (DataUnavailableError, requests.RequestException):
+            pass
+    return pd.DataFrame(margin_rows) if margin_rows else None
+
+
 def _run_for_date(
     session: requests.Session,
     date: dt.date,
@@ -2059,75 +2163,9 @@ def _run_for_date(
     if tpex_3insti is None:
         tpex_3insti = pd.DataFrame(columns=["symbol", "name", "foreign_net", "trust_net", "dealer_net"])
 
-    # Fetch margin trading data
-    twse_margin = None
-    tpex_margin = None
-
-    if margin_cache is not None:
-        # Use pre-fetched cache (backfill mode with cache)
-        # margin_cache will be used directly in _build_daily_rows
-        pass
-    elif date == today:
-        # Use dated MI_MARGN report for today's data (all stocks at once)
-        try:
-            with _phase(f"{sheet_name} TWSE 融資融券"):
-                twse_margin_raw, twse_margin_date = fetch_twse_margin(session, date)
-            # 嚴格驗證資料日期 == 當日；不符（TWSE 尚未發布或回舊資料）就不寫，
-            # 缺值由 D+1 的 MoneyDJ 修正機制補，避免 D-1 值被誤標成 D。
-            if twse_margin_date == date:
-                twse_margin = prepare_twse_margin(twse_margin_raw)
-            else:
-                print(f"{sheet_name} TWSE 融資融券日期不匹配：{twse_margin_date} != {date}")
-        except (DataUnavailableError, requests.RequestException) as exc:
-            print(f"{sheet_name} TWSE 融資融券取得失敗：{exc}")
-
-        # Try V2 first (supports date parameter), fallback to OpenAPI
-        try:
-            with _phase(f"{sheet_name} TPEX 融資融券 V2"):
-                tpex_margin_raw, tpex_margin_date = fetch_tpex_margin_v2(session, date)
-            if tpex_margin_date is None or tpex_margin_date == date:
-                tpex_margin = prepare_tpex_margin_v2(tpex_margin_raw)
-            else:
-                print(f"{sheet_name} TPEX V2 融資融券日期不匹配：{tpex_margin_date} != {date}")
-        except (DataUnavailableError, requests.RequestException) as exc:
-            print(f"{sheet_name} TPEX V2 融資融券取得失敗：{exc}")
-
-        if tpex_margin is None:
-            try:
-                with _phase(f"{sheet_name} TPEX 融資融券 OpenAPI（V2 回退）"):
-                    tpex_margin_raw, tpex_margin_date = fetch_tpex_margin(session)
-                if tpex_margin_date is None or tpex_margin_date == date:
-                    tpex_margin = prepare_tpex_margin(tpex_margin_raw)
-                else:
-                    print(
-                        f"{sheet_name} TPEX OpenAPI 融資融券日期不匹配："
-                        f"{tpex_margin_date} != {date}"
-                    )
-            except (DataUnavailableError, requests.RequestException) as exc2:
-                print(f"{sheet_name} TPEX 融資融券取得失敗：{exc2}")
-    else:
-        # Use MoneyDJ for historical data (per-stock, build combined DataFrame)
-        # This path is only used when margin_cache is not provided (single date backfill)
-        margin_rows = []
-        fetch_start = date - dt.timedelta(days=10)
-        fetch_end = date
-        for _, item in holdings.iterrows():
-            symbol = str(item["symbol"]).strip()
-            try:
-                moneydj_raw = fetch_moneydj_margin(session, symbol, fetch_start, fetch_end)
-                moneydj_df = prepare_moneydj_margin(moneydj_raw)
-                # Find row for target date
-                row = moneydj_df.loc[moneydj_df["date"] == date]
-                if not row.empty:
-                    row_data = row.iloc[0].to_dict()
-                    row_data["symbol"] = symbol
-                    margin_rows.append(row_data)
-            except (DataUnavailableError, requests.RequestException):
-                # Silently skip - margin data not critical
-                pass
-        if margin_rows:
-            # Combine into a single DataFrame that works like twse_margin
-            twse_margin = pd.DataFrame(margin_rows)
+    twse_margin, tpex_margin = _resolve_margin_sources(
+        session, date, today, sheet_name, holdings, margin_cache
+    )
 
     # Fetch holding percentage data (per-stock, when not using cache)
     # daily 模式不帶 cache，故此處是逐檔對 MoneyDJ 各打一次；失敗一律吞掉，
