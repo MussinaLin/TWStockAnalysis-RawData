@@ -1261,6 +1261,110 @@ def _price_limits(close, change, high=None, low=None):
     return limit_up, limit_down
 
 
+def _find_symbol_row(df: pd.DataFrame | None, symbol: str) -> pd.Series | None:
+    """在整批來源裡找出該 symbol 的列；來源缺席、空表、查無此檔都回 None。"""
+    if df is None or df.empty:
+        return None
+    row = df.loc[df["symbol"] == symbol]
+    if row.empty:
+        return None
+    return row.iloc[0]
+
+
+def _ohlcv_from_row(row: pd.Series) -> tuple:
+    """由整批來源的一列取出 (open, close, high, low, volume)。
+
+    open / close 用直接索引，缺欄代表來源格式異常，應該當場炸；
+    high / low / volume 用 .get()，部分來源本來就沒有這幾欄。
+    """
+    return (row["open"], row["close"], row.get("high"), row.get("low"), row.get("volume"))
+
+
+def _fill_missing_ohlcv(current: tuple, row: pd.Series) -> tuple:
+    """只補 current 裡為 None 的欄位；已有值的不覆寫，也不重新求值。"""
+    open_price, close_price, high_price, low_price, volume = current
+    if open_price is None:
+        open_price = row["open"]
+    if close_price is None:
+        close_price = row["close"]
+    if high_price is None:
+        high_price = row.get("high")
+    if low_price is None:
+        low_price = row.get("low")
+    if volume is None:
+        volume = row.get("volume")
+    return (open_price, close_price, high_price, low_price, volume)
+
+
+def _fill_ohlcv_from_stock_day(
+    session: requests.Session,
+    date: dt.date,
+    symbol: str,
+    twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame],
+    current: tuple,
+) -> tuple:
+    """STOCK_DAY 逐檔月表補值 —— 全函式唯一的逐檔 HTTP，最後手段。
+
+    抓不到（DataUnavailableError）時原樣回傳 current，不讓例外往外擴散：
+    這是 fallback 鏈的最後一環，缺值由呼叫端寫成 NULL。
+    """
+    month_start = date.replace(day=1)
+    cache_key = (symbol, month_start)
+    twse_day = twse_month_cache.get(cache_key)
+
+    if twse_day is None:
+        try:
+            twse_day = fetch_twse_stock_day(session, symbol, date)
+            twse_month_cache[cache_key] = twse_day
+        except DataUnavailableError:
+            return current
+
+    # find_twse_ohlcv 的順序是 (open, high, low, close, volume)，
+    # 與 _ohlcv_from_row 的 (open, close, high, low, volume) 不同，不可混用。
+    ohlcv = find_twse_ohlcv(twse_day, date)
+    open_price, close_price, high_price, low_price, volume = current
+    if open_price is None:
+        open_price = ohlcv[0]
+    if high_price is None:
+        high_price = ohlcv[1]
+    if low_price is None:
+        low_price = ohlcv[2]
+    if close_price is None:
+        close_price = ohlcv[3]
+    if volume is None:
+        volume = ohlcv[4]
+    return (open_price, close_price, high_price, low_price, volume)
+
+
+def _lookup_change(
+    symbol: str,
+    twse_mi_index: pd.DataFrame | None,
+    tpex_quotes: pd.DataFrame,
+):
+    """漲跌價差 —— 只從 MI_INDEX / TPEX quotes 取，兩者皆無時回 None。
+
+    刻意不從 STOCK_DAY_ALL 取：它在除權息日給 Change=0.0000 且不帶任何標記，
+    會算出「參考價 = 收盤」的錯值。兩邊都沒有時留 None，由呼叫端寫成 NULL
+    （不以前日收盤推測）。
+    """
+    change = None
+    row = _find_symbol_row(twse_mi_index, symbol)
+    if row is not None:
+        change = row.get("change")
+
+    # 注意：用 `is None`、不是 `pd.isna`。MI_INDEX 除權息日回的 change 是 NaN
+    # 不是 None，所以上一個 block 賦值後，這裡的 `change is None` 不會為 True，
+    # 不會誤把上市股（不在 TPEX）的 NaN 又拿 TPEX 的資料覆蓋一次 —— 只是這個
+    # 「不會誤觸發」目前是靠「上市股不在 TPEX quotes 裡」這個外部事實撐住，
+    # 不是程式碼本身保證的。日後若再加第三個 change 來源（尤其若它的「找不到」
+    # 用 None 表示），這裡要重新檢視，否則可能把已取到的 NaN 又蓋一次。
+    if change is None:
+        row = _find_symbol_row(tpex_quotes, symbol)
+        if row is not None:
+            change = row.get("change")
+    return change
+
+
 def _fetch_ohlcv_with_fallback(
     session: requests.Session,
     date: dt.date,
@@ -1283,103 +1387,43 @@ def _fetch_ohlcv_with_fallback(
     market_type 為 "tpex" 時完全跳過 STOCK_DAY：那支 API 只有上市資料，對上櫃股
     必定回「很抱歉，沒有符合條件的資料!」，打了純粹浪費限流配額。未知（None）時
     維持既有行為往下打，不誤殺 —— `--backfill-stocks` 直接給代號時就沒有市場別。
+
+    各來源的觸發條件刻意寫在這裡而不是下沉到 helper：change 的取得（_lookup_change）
+    必須維持獨立、不可併進 STOCK_DAY 區塊的 any(v is None ...) 條件，否則每檔都會
+    多打一次 API。
     """
-    open_price = close_price = high_price = low_price = volume = None
-    change = None
+    ohlcv: tuple = (None, None, None, None, None)
 
-    # 注意：change 刻意不從 STOCK_DAY_ALL 取 —— 它在除權息日給 Change=0.0000
-    # 且不帶任何標記，會算出「參考價 = 收盤」的錯值。change 只從 MI_INDEX /
-    # TPEX quotes 取，見本函式末尾的獨立區塊。
-    # Try TWSE STOCK_DAY_ALL（全市場批次）
-    if twse_day_all is not None:
-        row = twse_day_all.loc[twse_day_all["symbol"] == symbol]
-        if not row.empty:
-            open_price = row.iloc[0]["open"]
-            close_price = row.iloc[0]["close"]
-            high_price = row.iloc[0].get("high")
-            low_price = row.iloc[0].get("low")
-            volume = row.iloc[0].get("volume")
+    # TWSE STOCK_DAY_ALL（全市場批次）
+    row = _find_symbol_row(twse_day_all, symbol)
+    if row is not None:
+        ohlcv = _ohlcv_from_row(row)
 
-    # Try TWSE MI_INDEX（全市場批次，涵蓋全部上市）
-    if any(v is None for v in [open_price, close_price, high_price, low_price, volume]):
-        if twse_mi_index is not None:
-            row = twse_mi_index.loc[twse_mi_index["symbol"] == symbol]
-            if not row.empty:
-                if open_price is None:
-                    open_price = row.iloc[0]["open"]
-                if close_price is None:
-                    close_price = row.iloc[0]["close"]
-                if high_price is None:
-                    high_price = row.iloc[0].get("high")
-                if low_price is None:
-                    low_price = row.iloc[0].get("low")
-                if volume is None:
-                    volume = row.iloc[0].get("volume")
+    # TWSE MI_INDEX（全市場批次，涵蓋全部上市）
+    if any(v is None for v in ohlcv):
+        row = _find_symbol_row(twse_mi_index, symbol)
+        if row is not None:
+            ohlcv = _fill_missing_ohlcv(ohlcv, row)
 
-    # Try TPEX quotes（全市場批次，涵蓋全部上櫃）
-    if open_price is None and close_price is None:
-        row = tpex_quotes.loc[tpex_quotes["symbol"] == symbol]
-        if not row.empty:
-            open_price = row.iloc[0]["open"]
-            close_price = row.iloc[0]["close"]
-            high_price = row.iloc[0].get("high")
-            low_price = row.iloc[0].get("low")
-            volume = row.iloc[0].get("volume")
+    # TPEX quotes（全市場批次，涵蓋全部上櫃）
+    if ohlcv[0] is None and ohlcv[1] is None:
+        row = _find_symbol_row(tpex_quotes, symbol)
+        if row is not None:
+            ohlcv = _ohlcv_from_row(row)
 
-    # Try TWSE STOCK_DAY (monthly) —— 唯一的逐檔 HTTP，最後手段。
+    # TWSE STOCK_DAY 月表 —— 唯一的逐檔 HTTP，最後手段。
     # 上櫃股直接跳過：TWSE 月表沒有上櫃資料，打了也只是消耗限流配額。
-    if market_type != "tpex" and any(
-        v is None for v in [open_price, close_price, high_price, low_price, volume]
-    ):
-        month_start = date.replace(day=1)
-        cache_key = (symbol, month_start)
-        twse_day = twse_month_cache.get(cache_key)
+    if market_type != "tpex" and any(v is None for v in ohlcv):
+        ohlcv = _fill_ohlcv_from_stock_day(session, date, symbol, twse_month_cache, ohlcv)
 
-        if twse_day is None:
-            try:
-                twse_day = fetch_twse_stock_day(session, symbol, date)
-                twse_month_cache[cache_key] = twse_day
-            except DataUnavailableError:
-                pass
-
-        if twse_day is not None:
-            ohlcv = find_twse_ohlcv(twse_day, date)
-            if open_price is None:
-                open_price = ohlcv[0]
-            if high_price is None:
-                high_price = ohlcv[1]
-            if low_price is None:
-                low_price = ohlcv[2]
-            if close_price is None:
-                close_price = ohlcv[3]
-            if volume is None:
-                volume = ohlcv[4]
-
-    # change（漲跌價差）獨立取得：不受 OHLCV 是否齊全影響，也不觸發逐檔 HTTP。
-    # MI_INDEX 涵蓋全部上市、TPEX quotes 涵蓋全部上櫃，兩者在 _run_for_date 都是
-    # 每日必抓；兩邊都沒有時留 None，由呼叫端寫成 NULL（不以前日收盤推測）。
-    if change is None and twse_mi_index is not None:
-        row = twse_mi_index.loc[twse_mi_index["symbol"] == symbol]
-        if not row.empty:
-            change = row.iloc[0].get("change")
-    # 注意：用 `is None`、不是 `pd.isna`。MI_INDEX 除權息日回的 change 是 NaN
-    # 不是 None，所以上一個 block 賦值後，這裡的 `change is None` 不會為 True，
-    # 不會誤把上市股（不在 TPEX）的 NaN 又拿 TPEX 的資料覆蓋一次 —— 只是這個
-    # 「不會誤觸發」目前是靠「上市股不在 TPEX quotes 裡」這個外部事實撐住，
-    # 不是程式碼本身保證的。日後若再加第三個 change 來源（尤其若它的「找不到」
-    # 用 None 表示），這裡要重新檢視，否則可能把已取到的 NaN 又蓋一次。
-    if change is None and not tpex_quotes.empty:
-        row = tpex_quotes.loc[tpex_quotes["symbol"] == symbol]
-        if not row.empty:
-            change = row.iloc[0].get("change")
-
+    open_price, close_price, high_price, low_price, volume = ohlcv
     return OhlcvResult(
         open=open_price,
         close=close_price,
         high=high_price,
         low=low_price,
         volume=volume,
-        change=change,
+        change=_lookup_change(symbol, twse_mi_index, tpex_quotes),
     )
 
 
