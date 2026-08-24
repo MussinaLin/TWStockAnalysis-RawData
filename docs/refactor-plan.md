@@ -19,7 +19,7 @@
 | `sources.py` 職責過寬 | MI **5.12**（C）、22 個 rank B+、373 行未覆蓋 | 強 |
 | 5 個死碼 | vulture 5 筆 + 覆蓋率獨立佐證：五者皆 1–12%，只有 `def` 那行在 import 時執行 | 強 |
 | TPEX V2 fetcher 三重複 | 三者覆蓋率 8% / 5% / 42%，都幾乎沒被走過 | 中 |
-| `_get_int_col` 兩份已分歧 | **覆蓋率讓問題更嚴重**：`prepare_twse_margin` 89%，`prepare_tpex_margin` **2%** | 強 |
+| `_get_int_col` 兩份已分歧 | 覆蓋率 89% vs **2%**；但追查後兩種寫法行為等價（見 D1），map 說「看不出哪邊對」已可判定 | 中（結論修正） |
 | `db.py` 低覆蓋但低風險 | 該檔 **0 個 rank B+**，平均 CC 1.75，未覆蓋的是直線程式碼 | 強 |
 
 死碼那項值得多說一句：vulture 是靜態分析、coverage 是動態執行，兩個獨立方法指向同一批
@@ -153,29 +153,91 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 
 ## 3. 需要你先決定的（不是純 refactor）
 
+> D2 已於 2026-08-24 實測結案，結論見下。D1 追查後降級為一般 refactor。
+
 這兩項在 map 裡被歸為「重複」，但實際上是**語意分歧**，機械式合併會選錯一邊。
 
-### [ ] D1 — `_get_int_col` 兩份的防護不一致
+### [ ] D1 — `_get_int_col` 兩份的防護不一致（追查後：**純樣式差異，非潛在 bug**）
 
 - **位置**：`prepare.py:436-440`（`if src_col:`）vs `prepare.py:512-516`（`if src_col and src_col in df.columns:`）
 - **覆蓋率**：`prepare_twse_margin` **89%** vs `prepare_tpex_margin` **2%**
-- **問題**：兩份其餘逐字相同，只差後者多一道 `and src_col in df.columns`。
-  是「TWSE 那邊漏了防護」還是「TPEX 那邊多此一舉」，從程式碼看不出來
-- **爆炸半徑**：中。`prepare_tpex_margin` 幾乎無測試，改錯不會被 pytest 抓到
-- **需要的動作**：先決定哪一邊是對的 → 補測試 → 才談合併
+- **追查結果**：兩邊的 `cols` 建構方式不同，但**保證同一個不變量**——值必定是
+  `df.columns` 的成員，或 `None`：
+  - `prepare_twse_margin` 走 `_find_columns` → `_find_column`（`prepare.py:27-35`），
+    後者 `for col in df.columns:` 迭代後 `return col`，回傳的必是真實欄位，否則 `None`。
+  - `prepare_tpex_margin` 走 `df_cols_lower = {c.lower(): c for c in df.columns}` 再
+    `.get(...)`，取出的必是真實欄位，否則 `None`。
 
-### [ ] D2 — `stat` 有效性檢查有三套判準
+  兩邊的 `cols` 在建構後到使用前都沒有再被改寫。因此 `and src_col in df.columns`
+  在 `src_col` 為真時**恆為 True**，是多餘的檢查；`prepare_twse_margin` 沒有它也是安全的。
+- **結論**：這不是「一邊漏了防護」，兩種寫法行為等價。統一成任一種都不改變行為，
+  可歸入一般 refactor。**但因為 `prepare_tpex_margin` 只有 2% 覆蓋率，仍需等 T6 補完測試再動。**
+- **真正的問題在別處，且兩邊都有**：pyright 對 `prepare.py:439` 與 `prepare.py:515`
+  同時回報 `Type "Series | DataFrame" is not assignable to return type "Series"`。
+  當 `df` 有同名重複欄位時 `df[src_col]` 回傳 DataFrame 而非 Series，`.map()` 會爆。
+  這個風險兩份都有，加 `in df.columns` 也擋不掉——它檢查的是「存不存在」，不是「唯不唯一」。
 
-- **位置**：`!= "OK"`（`sources.py:392, 533, 900, 1331, 1361, 1386, 1403`）、
-  `not in {None, "OK"}`（`sources.py:591`，唯一一筆）、
-  `not in {None, "ok", "OK"}`（`sources.py:710, 731, 806, 1009, 1072`）
-- **問題**：同一個概念（payload 算不算有效）有三種寬鬆度。TWSE 多用嚴格版、TPEX V2 多用寬鬆版，
-  但 `sources.py:591`（MI_INDEX）是唯一的中間版
-- **相關風險**：CLAUDE.md 記載「TWSE 限流回應無法與『沒資料』區分」。統一判準會直接影響
-  這條界線，不是純樣式問題
-- **需要的動作**：確認三種寬鬆度是刻意的還是歷史累積，再決定要不要統一
+### [x] D2 — `stat` 有效性檢查有三套判準（**已實測結案**）
 
----
+三種寫法在**兩個維度**上不同，不是寬鬆度的單一階梯：
+
+| 寫法 | `stat` 缺鍵（None） | 小寫 `"ok"` | 使用位置 |
+|---|---|---|---|
+| `!= "OK"` | **拒絕** | **拒絕** | `sources.py:392, 533, 900, 1331, 1361, 1386, 1403` |
+| `not in {None, "OK"}` | 接受 | **拒絕** | `sources.py:591`（MI_INDEX，唯一一筆） |
+| `not in {None, "ok", "OK"}` | 接受 | 接受 | `sources.py:710, 731, 806, 1009, 1072` |
+
+#### 證據一：git 考古 → 歷史累積，非刻意
+
+`git blame` 顯示**三種變體全部出自同一個 commit `c25738a`（2026-05-11,
+「feat: 複製 sources.py（API client 全套）」）**，是整批複製進來的，此後未再被碰過。
+同一個 commit 裡 TWSE 的 STOCK_DAY(392)、T86(533)、TAIEX(1331)、FMTQIK(1361) 都用嚴格版，
+只有 MI_INDEX(591) 用中間版——**同一批、同一個 host、同一種端點，判準卻不一致**。
+
+後來新增的兩處（`806` TPEX 個股月表 `5060bff7` 2026-08-22、`1072` TPEX 處置股
+`2c18abf0` 2026-08-21）都用寬鬆版，與「TPEX 用寬鬆」的模式一致。
+
+#### 證據二：實際呼叫 API（2026-08-24，4 發，間隔 30s）
+
+用專案自己的 `build_session(min_interval=2.0)` 打 `MI_INDEX`：
+
+| 情境 | date / params | HTTP | top-level keys | `stat` |
+|---|---|---|---|---|
+| A 交易日 | 20260821, type=ALLBUT0999 | 200 | `tables, type, params, stat, date` | `'OK'` |
+| B 週六 | 20260822, type=ALLBUT0999 | 200 | `stat, type` | `'很抱歉，沒有符合條件的資料!'` |
+| C 無效 type | 20260821, type=NOSUCHTYPE | 200 | `groups, tables, type, stat, date` | `'OK'` |
+| D 缺 type | 20260821 | 200 | `tables, type, stat, date` | `'OK'` |
+
+**四種情境（含兩種畸形請求）payload 一律是 dict，且一律帶 `stat` 鍵。**
+`sources.py:591` 的 `None` 分支在實測範圍內**不可達**。
+
+證據的界限：4 發不能證明「永遠不會缺 `stat`」。未涵蓋的是 5xx（被 `raise_for_status()`
+擋在前面）與維護頁面（會在 `.json()` 就失敗）。但在正常 JSON 回應的範圍內證據一致。
+
+#### 結論與最優解法
+
+- **`sources.py:591` 收斂成 `!= "OK"`**，與同一 commit 的其他 4 個 TWSE 端點一致。
+  依實測這是行為保持的（`None` 分支不可達），且移除一個誤導性的死分支。
+- **TWSE 嚴格 / TPEX 寬鬆的分野維持不動**。小寫 `"ok"` 確實只出現在 TPEX
+  （`tests/unit/test_tpex_stock_day.py:59`），這個分野有實證基礎。
+- **不要把 TWSE 放寬成接受 `None`**：`[[twse-rate-limit-ambiguous-response]]` 記載
+  TWSE 限流回 HTTP 200 + `{"stat":"很抱歉，沒有符合條件的資料!"}`，與真休市同字串。
+  上面情境 B 正是這個字串。嚴格版與中間版都會拒絕它（行為相同），但放寬到接受缺鍵
+  只會讓異常 payload 更容易被當成有效資料。
+
+#### 順帶發現：`sources.py:591` 與 `594` 的順序是錯的（潛伏，非現行）
+
+```python
+591    if payload.get("stat") not in {None, "OK"}:      # 先用了 payload.get()
+592        raise DataUnavailableError(...)
+594    if not isinstance(payload, dict):                 # 才檢查是不是 dict
+595        raise DataUnavailableError("TWSE MI_INDEX 回傳格式異常")
+```
+
+若 API 回傳 JSON 陣列，591 會先丟 `AttributeError`（list 沒有 `.get`），
+594 那道防護永遠到不了，且 `AttributeError` 不是 `DataUnavailableError`，
+不會走既有的錯誤處理路徑。4 發實測都回 dict，所以這是潛伏問題不是現行故障。
+修正方式是把 594-595 移到 591 之前——但這是另一種 transformation，應分開的 commit。
 
 ## 4. 需先補測試（覆蓋率不足，不可直接動）
 

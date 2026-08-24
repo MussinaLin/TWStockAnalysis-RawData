@@ -588,11 +588,15 @@ def fetch_twse_mi_index(session: requests.Session, date: dt.date) -> tuple[pd.Da
     response = session.get(TWSE_MI_INDEX_URL, params=params, timeout=30, verify=False)
     response.raise_for_status()
     payload = response.json()
-    if payload.get("stat") not in {None, "OK"}:
-        raise DataUnavailableError(payload.get("stat") or "TWSE MI_INDEX 回傳異常")
-
+    # 型別檢查必須在 payload.get() 之前：回傳 JSON 陣列時 list 沒有 .get，
+    # 先取值會丟 AttributeError 而非 DataUnavailableError，繞過既有錯誤處理。
     if not isinstance(payload, dict):
         raise DataUnavailableError("TWSE MI_INDEX 回傳格式異常")
+
+    # 與其他 TWSE 端點一致採嚴格判準。2026-08-24 實測（交易日 / 休市日 / 無效 type /
+    # 缺 type 四種情境）MI_INDEX 一律回 dict 且一律帶 stat，故不接受缺鍵。
+    if payload.get("stat") != "OK":
+        raise DataUnavailableError(payload.get("stat") or "TWSE MI_INDEX 回傳異常")
 
     data_date = None
     for key in ("date", "Date", "reportDate", "dataDate", "REPORTDATE", "DATADATE"):

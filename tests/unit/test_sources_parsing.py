@@ -21,6 +21,7 @@ from tw_stock_rawdata.sources import (
     _read_tpex_csv,
     _roc_to_date,
     fetch_twse_margin,
+    fetch_twse_mi_index,
 )
 
 
@@ -454,3 +455,82 @@ class TestFetchTwseMargin:
         _, data_date = fetch_twse_margin(session, dt.date(2026, 7, 2))
         assert data_date == dt.date(2026, 7, 1)
         assert data_date != dt.date(2026, 7, 2)
+
+
+# ---------------------------------------------------------------------------
+# fetch_twse_mi_index —— stat 判準與 payload 型別檢查
+#
+# 2026-08-24 實測 MI_INDEX 四種情境（交易日 / 休市日 / 無效 type / 缺 type），
+# 一律回 dict 且一律帶 stat。因此本端點與其他 TWSE 端點一致採嚴格判準：
+# 缺 stat 視為異常，不再當成 OK 放行。
+# ---------------------------------------------------------------------------
+
+
+class _FakeMiIndexResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeMiIndexSession:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def get(self, url, params=None, timeout=None, verify=None):
+        return _FakeMiIndexResponse(self._payload)
+
+
+def _make_mi_index_payload(**overrides) -> dict:
+    payload = {
+        "stat": "OK",
+        "date": "20260821",
+        "tables": [
+            {
+                "fields": ["證券代號", "證券名稱", "開盤價", "最高價", "最低價", "收盤價"],
+                "data": [["2330", "台積電", "2400.00", "2420.00", "2395.00", "2415.00"]],
+            },
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestFetchTwseMiIndexStat:
+    def test_stat_ok_returns_table_and_date(self):
+        session = _FakeMiIndexSession(_make_mi_index_payload())
+        df, data_date = fetch_twse_mi_index(session, dt.date(2026, 8, 21))
+        assert data_date == dt.date(2026, 8, 21)
+        assert len(df) == 1
+        assert df.iloc[0]["證券代號"] == "2330"
+
+    def test_no_data_stat_raises_with_original_message(self):
+        """休市日與限流回應共用這個字串（見 CLAUDE.md），必須被拒絕。"""
+        payload = {"stat": "很抱歉，沒有符合條件的資料!", "type": "ALLBUT0999"}
+        session = _FakeMiIndexSession(payload)
+        with pytest.raises(DataUnavailableError, match="沒有符合條件的資料"):
+            fetch_twse_mi_index(session, dt.date(2026, 8, 22))
+
+    def test_missing_stat_key_raises(self):
+        """缺 stat 不再放行——實測 MI_INDEX 不會回傳沒有 stat 的 payload。"""
+        payload = _make_mi_index_payload()
+        del payload["stat"]
+        session = _FakeMiIndexSession(payload)
+        with pytest.raises(DataUnavailableError, match="回傳異常"):
+            fetch_twse_mi_index(session, dt.date(2026, 8, 21))
+
+    def test_lowercase_stat_raises(self):
+        """MI_INDEX 是 TWSE 端點，不接受 TPEX 那邊才有的小寫 ok。"""
+        session = _FakeMiIndexSession(_make_mi_index_payload(stat="ok"))
+        with pytest.raises(DataUnavailableError):
+            fetch_twse_mi_index(session, dt.date(2026, 8, 21))
+
+    def test_non_dict_payload_raises_data_unavailable_not_attribute_error(self):
+        """型別檢查排在 payload.get() 之前：list 不可漏成 AttributeError。"""
+        session = _FakeMiIndexSession([{"stat": "OK"}])
+        with pytest.raises(DataUnavailableError, match="回傳格式異常"):
+            fetch_twse_mi_index(session, dt.date(2026, 8, 21))
