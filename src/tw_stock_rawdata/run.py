@@ -551,6 +551,86 @@ def _disposition_windows(start: dt.date, end: dt.date) -> list[tuple[dt.date, dt
     return windows
 
 
+def _fetch_market_disposition_frames(
+    session: requests.Session,
+    market: str,
+    fetcher,
+    windows: list[tuple[dt.date, dt.date]],
+) -> tuple[list[pd.DataFrame], bool]:
+    """抓單一市場所有窗口的處置公告，回傳 (frames, market_ok)。
+
+    market_ok 採「全部窗口都成功才算 ok」：只要有一段沒拿到，該市場當天就可能
+    有公告沒被看到，這時若還把該市場標成 ok，沒查到的個股會被 resolve() 寫成
+    「已確認非處置」(False, 0) 而不是 NULL —— 正是 CLAUDE.md 那段要防的事。
+    已成功窗口的 frames 仍然回傳：它們只產生 is_disposition=TRUE 的註記，
+    那些是確實看到公告才有的，永遠是對的。
+    """
+    frames: list[pd.DataFrame] = []
+    market_ok = True
+    for win_start, win_end in windows:
+        try:
+            frames.append(prepare_disposition(fetcher(session, win_start, win_end)))
+        except (DataUnavailableError, requests.RequestException) as exc:
+            print(f"處置股名單（{market} {win_start} ~ {win_end}）取得失敗：{exc}")
+            market_ok = False
+    return frames, market_ok
+
+
+def _merge_disposition_minutes(slot: dict[str, int | None], symbol: str, minutes: int | None) -> None:
+    """把一筆公告併進當日的 symbol -> 撮合分鐘數，同檔多筆取最小值。
+
+    最小值＝當日實際生效的最嚴格撮合頻率（處置期間可能重疊）。
+    minutes 為 None（有處置但分鐘數不明）時不覆寫已經取到的數值。
+    """
+    if symbol not in slot:
+        slot[symbol] = minutes
+    elif minutes is not None and (slot[symbol] is None or minutes < slot[symbol]):
+        slot[symbol] = minutes
+
+
+def _expand_disposition_frames(
+    frames: list[pd.DataFrame],
+    by_date: dict[dt.date, dict[str, int | None]],
+    start: dt.date,
+    end: dt.date,
+) -> None:
+    """把公告的 [start_date, end_date] 展開成逐日註記，就地寫進 by_date。
+
+    展開後只保留 [start, end] 內的日期——查詢窗口往前推了 45 天，抓回來的
+    公告會涵蓋區間外的日子。
+    """
+    for frame in frames:
+        for _, row in frame.iterrows():
+            symbol = row["symbol"]
+            minutes = row["match_minutes"]
+            minutes = None if minutes is None or pd.isna(minutes) else int(minutes)
+            day = max(row["start_date"], start)
+            last = min(row["end_date"], end)
+            while day <= last:
+                _merge_disposition_minutes(by_date.setdefault(day, {}), symbol, minutes)
+                day += dt.timedelta(days=1)
+
+
+def _print_disposition_summary(
+    ok_markets: set[str],
+    by_date: dict[dt.date, dict[str, int | None]],
+    n_windows: int,
+    start: dt.date,
+    end: dt.date,
+) -> None:
+    """印出處置名單取得結果；兩市場皆失敗時明說該欄位本次不寫入。"""
+    if not ok_markets:
+        print("處置股名單：兩市場皆取得失敗，該欄位本次不寫入（保留 DB 既有值）")
+        return
+    n_days = len(by_date)
+    n_symbols = len({s for day in by_date.values() for s in day})
+    print(
+        f"處置股名單：{'／'.join(sorted(ok_markets))} 取得成功"
+        f"（每市場 {n_windows} 段查詢），"
+        f"{start} ~ {end} 內 {n_days} 天 / {n_symbols} 檔標的在處置期間"
+    )
+
+
 def _fetch_disposition(
     session: requests.Session,
     start: dt.date,
@@ -587,46 +667,14 @@ def _fetch_disposition(
         ("twse", fetch_twse_disposition),
         ("tpex", fetch_tpex_disposition),
     ):
-        market_ok = True
-        frames: list[pd.DataFrame] = []
-        for win_start, win_end in windows:
-            try:
-                frames.append(prepare_disposition(fetcher(session, win_start, win_end)))
-            except (DataUnavailableError, requests.RequestException) as exc:
-                print(f"處置股名單（{market} {win_start} ~ {win_end}）取得失敗：{exc}")
-                market_ok = False
-
+        frames, market_ok = _fetch_market_disposition_frames(
+            session, market, fetcher, windows
+        )
         if market_ok:
             ok_markets.add(market)
+        _expand_disposition_frames(frames, by_date, start, end)
 
-        for frame in frames:
-            for _, row in frame.iterrows():
-                symbol = row["symbol"]
-                minutes = row["match_minutes"]
-                minutes = None if minutes is None or pd.isna(minutes) else int(minutes)
-                day = max(row["start_date"], start)
-                last = min(row["end_date"], end)
-                while day <= last:
-                    slot = by_date.setdefault(day, {})
-                    if symbol not in slot:
-                        slot[symbol] = minutes
-                    elif minutes is not None and (
-                        slot[symbol] is None or minutes < slot[symbol]
-                    ):
-                        slot[symbol] = minutes
-                    day += dt.timedelta(days=1)
-
-    if ok_markets:
-        n_days = len(by_date)
-        n_symbols = len({s for day in by_date.values() for s in day})
-        print(
-            f"處置股名單：{'／'.join(sorted(ok_markets))} 取得成功"
-            f"（每市場 {len(windows)} 段查詢），"
-            f"{start} ~ {end} 內 {n_days} 天 / {n_symbols} 檔標的在處置期間"
-        )
-    else:
-        print("處置股名單：兩市場皆取得失敗，該欄位本次不寫入（保留 DB 既有值）")
-
+    _print_disposition_summary(ok_markets, by_date, len(windows), start, end)
     return DispositionData(by_date, frozenset(ok_markets))
 
 
