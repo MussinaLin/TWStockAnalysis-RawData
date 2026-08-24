@@ -392,15 +392,34 @@ CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。
 
 ## 6. 明確不做
 
-### [ ] N1 — 不合併 `update_price_limits_batch` / `update_disposition_batch`
+### [x] N1 — 門檻改為兩次後，逐字重複已全部合併（2026-08-24）
 
-- **位置**：`db_utils.py:332-370`、`db_utils.py:373-413`
-- **理由**：兩者結構逐行同構、且**都是 100% 覆蓋**，技術上是最安全的合併對象。
-  但只重複 **2 次**，未達 CLAUDE.md 的 3 次門檻。條件成立（出現第三個批次 update）再說
-- 同理不做：`fetch_twse_taiex_ohlc` / `fetch_twse_market_volume`（2 次）、
-  `expand_twse_stock_day` / `expand_tpex_stock_day`（2 次，P6 只移動不合併）、
-  `_backfill_limits_command` / `_backfill_disposition_command`（2 次）、
-  `_parse_moneydj_date`（2 次）、`_is_valid_date_row`（2 次）
+CLAUDE.md 的抽象門檻由三次改為**兩次**：確認邏輯相同就重用；結構相似但語意不同
+（欄位、單位、端點、來源不同）者不算，需個別判斷是否值得參數化。
+
+**已合併（逐字相同）**：
+
+| 原重複處 | 合併為 | 覆蓋率 |
+|---|---|---|
+| `prepare.py` 兩份 `_get_int_col` | `_int_col_or_nulls(df, cols, col_name)` | 100% |
+| `prepare.py` 兩份 `_parse_moneydj_date` | 模組層級 `_parse_moneydj_date` | 100% |
+| `sources.py` 兩份 `_is_valid_date_row` | `_is_moneydj_date_row` + `_MONEYDJ_ROC_DATE_RE` | 100% |
+
+三組都先補測試再合併（新增 `test_prepare_tpex_margin.py` 9 個、
+`test_prepare_moneydj.py` 23 個），`prepare_tpex_margin` 2% → 100%、
+`prepare_moneydj_margin` 5% → 100%。
+
+**未合併（結構同構但語意不同，需個別判斷是否值得參數化）**：
+
+| 對象 | 差異 | 覆蓋率 | 備註 |
+|---|---|---|---|
+| `update_price_limits_batch` / `update_disposition_batch`（`db_utils.py`） | SET 欄位名、`%s::` 型別轉換（numeric,numeric vs boolean,smallint） | 100% / 100% | 骨架逐行同構，參數化代價低；但把欄位名與型別轉換變成字串參數會削弱可讀性與型別檢查 |
+| `expand_twse_stock_day` / `expand_tpex_stock_day`（`prepare.py`） | 欄位名（`日期` vs `日 期`、`開盤價` vs `開盤`）、**成交量單位（股 vs 張，後者需 ×1000）** | 92% / 100% | 單位換算是語意差異不是參數差異，合併需在函式內分支，可讀性反而變差 |
+| `fetch_twse_taiex_ohlc` / `fetch_twse_market_volume`（`sources.py`） | URL、回傳結構（4 欄 dict vs 單一 int） | 7% / 7% | 前 7 行同構，後半完全不同；且兩者覆蓋率都極低，合併前需先補測試 |
+| `_backfill_limits_command` / `_backfill_disposition_command`（`run.py`） | 忽略的參數不同（前者忽略 `--backfill-stocks`，後者支援它） | 84% / 77% | 只有參數驗證前置段同構，主體邏輯不同 |
+
+這四組的共通點是**差異落在語意層而非參數層**，機械式合併會把「兩個東西不一樣」
+這個事實藏進 if 分支或字串參數裡。建議個別評估，不隨新門檻自動合併。
 
 ### [ ] N2 — 暫不拆 `run.py` / `sources.py` 成多個模組
 
