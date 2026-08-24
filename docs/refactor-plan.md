@@ -358,13 +358,23 @@ TWSE 整批裡就直接回傳，即使有欄位是 NaN 也不去 TPEX 補（上�
 `_fill_margin_from` B (8)。以舊實作對 147 組輸入（兩來源各 7 種形態 × 三個
 查詢代號）比對回傳 dict，差異 0。
 
-### [ ] T5 — `correct_prev_margin_balance`
+### [x] T5 — `correct_prev_margin_balance`
 
 - **位置**：`db_utils.py:542-612`（71 行）
 - **CC / 覆蓋率**：8 (B) / **4%**（1 執行 / 24 未覆蓋）
 - **爆炸半徑**：低（src 2 處、tests 0）
 - **為何值得補**：它做「前日／前前日餘額一致性修正」，是 `db_utils.py` 邏輯最繞的一段，
   且與 `_consensus_prev_trade_date` 的 gap 處理耦合。無測試等於無保護
+
+**實際結果**（2026-08-24）：新增 `tests/unit/test_correct_prev_margin_balance.py`
+10 個案例，覆蓋率 **4% → 100%**（連帶 `_consensus_prev_trade_date` 也到 100%）。
+
+這是 `db_utils` 邏輯最繞的一段——要處理 D-1 與 D-2 兩層共識日推算，且
+「找不到共識」與「值為 NULL」必須導向不同結果。測試把四種放棄條件
+（兩表 MAX 不一致／任一表缺日／market_daily 該日無列／新舊值完全一致）與
+三種 NULL change 來源（D-2 無共識／D-2 該日 balance 為 NULL／D-2 無列）
+分開釘住，另驗證「balance 已一致但 change 仍 stale 也要修」這條容易被
+`if balance == api_balance: return` 之類的簡化誤刪的路徑。
 
 ### [ ] T6 — `prepare_tpex_margin` / `prepare_tpex_margin_v2`
 
@@ -381,11 +391,19 @@ TWSE 整批裡就直接回傳，即使有欄位是 NaN 也不去 TPEX 補（上�
 - **不對稱**：孿生的 `fetch_moneydj_holding_pct` 覆蓋率 88%、CC 13。同一組邏輯，
   一邊有保護一邊沒有。`_is_valid_date_row` 的重複（`sources.py:1141` / `1277`）就跨在這兩者之間
 
-### [ ] T8 — `upsert_holder_percent`
+### [x] T8 — `upsert_holder_percent`
 
 - **位置**：`db_utils.py:471-516`
 - **CC / 覆蓋率**：7 (B) / **5%**
 - **爆炸半徑**：低（src 2 處、tests 0）
+
+**實際結果**（2026-08-24）：新增 `tests/unit/test_upsert_holder_percent.py`
+11 個案例，覆蓋率 **5% → 100%**。
+
+重點釘住 ON CONFLICT 的三欄語意刻意不一致：`name` 與 `retail_ratio` 用
+COALESCE（不可把既有股名／歷史散戶比例蓋成 NULL），`major_ratio` 則直接
+EXCLUDED 覆寫（那是本次要更新的主資料）。另涵蓋空 rows／全空白 symbol 完全
+不觸 DB、空白 symbol 過濾、空白股名轉 None（才能讓 COALESCE 生效）。
 
 ### [ ] T9 — `_main_inner`
 
