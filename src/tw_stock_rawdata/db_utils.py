@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager
 import math
 from decimal import Decimal
 
@@ -57,6 +58,31 @@ def _safe(val):
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _connect(database_url: str):
+    """開一條連線。取代各函式重複的 `pool = get_pool(url)` + `with pool.connection()`。
+
+    本 helper **不負責 commit**，交由呼叫端自己決定：各寫入函式的 commit 時機
+    不一致（有的在 cursor 區塊結束後、有的緊接 execute 之後），在此統一 commit
+    會改變交易邊界，那就不是行為保持的重構了。
+    """
+    pool = get_pool(database_url)
+    with pool.connection() as conn:
+        yield conn
+
+
+def _fetch_all(database_url: str, sql: str, params: tuple | None = None) -> list:
+    """唯讀查詢，回傳所有列。"""
+    with _connect(database_url) as conn:
+        return conn.execute(sql, params).fetchall() if params else conn.execute(sql).fetchall()
+
+
+def _fetch_one(database_url: str, sql: str, params: tuple | None = None):
+    """唯讀查詢，回傳第一列（無列時 None）。"""
+    with _connect(database_url) as conn:
+        return conn.execute(sql, params).fetchone() if params else conn.execute(sql).fetchone()
+
+
 def upsert_stock_shares(
     database_url: str,
     df: pd.DataFrame,
@@ -69,8 +95,7 @@ def upsert_stock_shares(
         return
 
     total = len(df)
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         with conn.cursor() as cur:
             params = []
             for _, row in df.iterrows():
@@ -102,21 +127,13 @@ def get_config_value(database_url: str, key: str) -> str | None:
 
     查無該 key 時回傳 None。表不存在等 DB 錯誤由呼叫端處理。
     """
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
-        row = conn.execute(
-            "SELECT value FROM config WHERE key = %s", (key,)
-        ).fetchone()
+    row = _fetch_one(database_url, "SELECT value FROM config WHERE key = %s", (key,))
     return row[0] if row else None
 
 
 def load_stock_names(database_url: str) -> dict[str, str]:
     """Load stock name mapping from stocks table."""
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT symbol, name FROM stocks WHERE name != ''"
-        ).fetchall()
+    rows = _fetch_all(database_url, "SELECT symbol, name FROM stocks WHERE name != ''")
     return {r[0]: r[1] for r in rows}
 
 
@@ -125,12 +142,10 @@ def load_stock_shares(database_url: str) -> dict[str, int]:
 
     Returns dict mapping symbol to issued shares count.
     """
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT symbol, issued_shares FROM stocks"
-            " WHERE issued_shares IS NOT NULL"
-        ).fetchall()
+    rows = _fetch_all(
+        database_url,
+        "SELECT symbol, issued_shares FROM stocks WHERE issued_shares IS NOT NULL",
+    )
     return {r[0]: int(r[1]) for r in rows}
 
 
@@ -142,12 +157,11 @@ def get_enabled_stocks(
     market_type 為 'twse' / 'tpex'（未填則 None），用來決定該檔能不能走 TWSE 的
     逐檔月表 fallback，見 `_fetch_ohlcv_with_fallback`。
     """
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT symbol, name, industry_type, industry_desc, market_type"
-            " FROM stocks WHERE enabled = TRUE ORDER BY symbol"
-        ).fetchall()
+    rows = _fetch_all(
+        database_url,
+        "SELECT symbol, name, industry_type, industry_desc, market_type"
+        " FROM stocks WHERE enabled = TRUE ORDER BY symbol",
+    )
     return [(r[0], r[1], r[2], r[3], _norm_market_type(r[4])) for r in rows]
 
 
@@ -165,11 +179,10 @@ def load_market_types(database_url: str) -> dict[str, str]:
     給 `--backfill-stocks` 用：那條路徑的個股清單直接來自 CLI 參數，沒有市場別，
     少了它上櫃股每檔每日都會白打一次 TWSE 月表。
     """
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT symbol, market_type FROM stocks WHERE market_type IS NOT NULL"
-        ).fetchall()
+    rows = _fetch_all(
+        database_url,
+        "SELECT symbol, market_type FROM stocks WHERE market_type IS NOT NULL",
+    )
     return {r[0]: mt for r in rows if (mt := _norm_market_type(r[1])) is not None}
 
 
@@ -230,8 +243,7 @@ def upsert_daily_raw(
         f" ON CONFLICT (symbol, trade_date) DO UPDATE SET {set_clause}"
     )
 
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         ensure_partition(conn, trade_date)
         with conn.cursor() as cur:
             cur.executemany(sql, rows)
@@ -253,8 +265,7 @@ def find_consensus_prev_trade_date(
     若兩邊 MAX(trade_date) < current_date 不一致（任一邊缺日），回傳 None。
     呼叫端在 None 時應跳過修正，避免 gap 情境下把資料寫到錯誤的歷史 row。
     """
-    pool = get_pool(database_url)
-    with pool.connection() as conn, conn.cursor() as cur:
+    with _connect(database_url) as conn, conn.cursor() as cur:
         return _consensus_prev_trade_date(cur, current_date)
 
 
@@ -287,8 +298,7 @@ def update_prev_day_margin_batch(
     )
 
     n_updated = 0
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         with conn.cursor() as cur:
             for symbol, trade_date, data in updates:
                 params = [_safe(data.get(c)) for c in _PREV_MARGIN_COLS]
@@ -324,8 +334,7 @@ def update_price_limits_batch(
         return 0
 
     n_updated = 0
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         with conn.cursor() as cur:
             for start in range(0, len(updates), _BATCH_UPDATE_CHUNK):
                 chunk = updates[start:start + _BATCH_UPDATE_CHUNK]
@@ -366,8 +375,7 @@ def update_disposition_batch(
         return 0
 
     n_updated = 0
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         with conn.cursor() as cur:
             for start in range(0, len(updates), _BATCH_UPDATE_CHUNK):
                 chunk = updates[start:start + _BATCH_UPDATE_CHUNK]
@@ -394,8 +402,7 @@ def load_symbols_for_date(database_url: str, trade_date: dt.date) -> set[str]:
     給 --backfill-limits 先過濾用：交易所公布的是全市場標的（含權證等，單日約
     6700 筆），本 repo 只存 enabled 個股的兩百多列，其餘送上去只會命中 0 列。
     """
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         rows = conn.execute(
             "SELECT symbol FROM stock_daily_raw WHERE trade_date = %s", (trade_date,)
         ).fetchall()
@@ -416,7 +423,6 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         data: dict with keys: taiex_open, taiex_high, taiex_low, taiex_close,
               total_volume, margin_balance, margin_balance_change, foreign_net.
     """
-    pool = get_pool(database_url)
     row = {"trade_date": trade_date, **data}
     cols = [
         "trade_date", "taiex_open", "taiex_high", "taiex_low", "taiex_close",
@@ -433,7 +439,7 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         f"INSERT INTO market_daily ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT (trade_date) DO UPDATE SET {updates}"
     )
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         conn.execute(sql, row)
         conn.commit()
 
@@ -483,8 +489,7 @@ def upsert_holder_percent(
         "     retail_ratio = COALESCE(EXCLUDED.retail_ratio, stock_holder_percent.retail_ratio)"
     )
 
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         with conn.cursor() as cur:
             cur.executemany(sql, params)
         conn.commit()
@@ -541,8 +546,7 @@ def correct_prev_margin_balance(
         (prev_trade_date, old_balance, new_balance, old_change, new_change) 若有更新；
         None 若找不到 D-1 共識日、market_daily 缺該日、或新舊值完全一致。
     """
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
+    with _connect(database_url) as conn:
         with conn.cursor() as cur:
             prev_trade_date = _consensus_prev_trade_date(cur, current_date)
             if prev_trade_date is None:
