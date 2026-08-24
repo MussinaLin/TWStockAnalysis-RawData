@@ -469,7 +469,7 @@ CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。
 - **爆炸半徑**：中（fan-in 6 / 2 / 5）
 - **前置**：三者覆蓋率都低，需先補測試
 
-### [ ] X3 — `db_utils.py` 連線樣板（16 次）
+### [x] X3 — `db_utils.py` 連線樣板（15 次）
 
 - **位置**：`db_utils.py` 內 16 個 public 函式各自 `pool = get_pool(database_url)` + `with pool.connection()`
 - **transformation**：新增抽象層（16 次，遠超門檻）
@@ -477,6 +477,25 @@ CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。
   但 `upsert_holder_percent` 5%、`correct_prev_margin_balance` 4%、`upsert_stocks` 12%
 - **爆炸半徑**：高（LSP 確認 `get_pool` 20 refs，其中 16 個在此檔）
 - **前置**：需 T5 / T8 完成
+
+**實際結果**（2026-08-24）：實際是 15 次而非 16——`upsert_stocks` 已於 P1 刪除。
+
+前置作業：先補 `tests/unit/test_db_utils_queries.py` 15 個案例，把七個覆蓋率
+20% 以下的函式（五個唯讀查詢 + `upsert_stock_shares` + `upsert_market_daily`）
+補到 100%，`db_utils.py` 全檔 **75% → 99%**，才有本錢動共用樣板。
+
+重構本體：
+- `_connect(url)` contextmanager 取代 `pool = get_pool(url)` + `with
+  pool.connection()`，呼叫點 **15 → 1**。
+- `_fetch_all` / `_fetch_one` 讓五個唯讀查詢只剩「SQL + 轉換」兩件事。
+- `_connect` 刻意不負責 commit：各寫入函式的 commit 時機不一致，統一會改變
+  交易邊界，就不是行為保持的重構了。
+
+檔案行數 587 → 590（多的是三個 helper 的簽名與 docstring），但日後要改連線
+行為（逾時、retry、metrics）只需動一個地方。
+
+驗證：以舊實作對 14 個函式各跑代表性輸入，比對回傳值、cursor 收到的 SQL/params、
+以及 commit 與否，差異 0。
 
 ---
 
