@@ -398,13 +398,30 @@ V2 最容易壞的是欄位歧義修正：`_find_column` 用「包含」比對�
 
 `prepare.py` 全檔覆蓋率 52% → 75%。
 
-### [ ] T7 — `fetch_moneydj_margin`
+### [x] T7 — `fetch_moneydj_margin`
 
 - **位置**：`sources.py:1081-1176`
 - **CC / 覆蓋率**：15 (C) / **22%**
 - **爆炸半徑**：中（src 5 處、tests 9 處）
 - **不對稱**：孿生的 `fetch_moneydj_holding_pct` 覆蓋率 88%、CC 13。同一組邏輯，
   一邊有保護一邊沒有。`_is_valid_date_row` 的重複（`sources.py:1141` / `1277`）就跨在這兩者之間
+
+**實際結果**（2026-08-24）：新增 `tests/unit/test_moneydj_margin.py` 10 個案例，
+覆蓋率 **26% → 100%**。用 conftest 的共用 `FakeSession`（該批 HTTP 假物件於
+commit 36b44e4 集中）。
+
+這張表是**靠位置取欄**的（0:日期 1:資買 2:資賣 4:資餘額 5:資增減 8:券賣
+9:券買 11:券餘額 12:券增減），所以「挑中哪張表」與「濾掉哪些列」是正確性關鍵——
+挑錯表或混進合計列都會整批錯位，而且不會有任何錯誤訊號。測試分別釘住：
+表格選取（欄數不足 12 的小表不可誤選、子表頭缺「日期」不可誤選、
+位置對應正確）與列過濾（合計列、西元日期列被丟掉、全部無效時拋
+DataUnavailableError）。
+
+另釘住請求參數形狀：MoneyDJ 吃 `YYYY-M-D`，補零會查不到。
+
+`read_html` 的 ValueError 刻意不在函式內攔截（讓 retry 吸收暫時性壞 HTML）
+這條也寫成測試，但必須把 `sources.time.sleep` 停掉，否則單這一個案例會真的
+等完整個 backoff（實測 8.6 秒）。
 
 ### [x] T8 — `upsert_holder_percent`
 
