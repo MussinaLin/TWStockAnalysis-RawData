@@ -1,0 +1,325 @@
+# Refactor Plan
+
+依 `docs/refactor-map.md` + radon 6.0.1 / vulture 2.16 / pytest-cov 7.1.0 四份報告交叉驗證後
+排出的優先級清單。基準：commit `7a3ed8b`，368 passed，整體覆蓋率 53%。
+
+排序規則（依要求）：**高複雜度 + 高覆蓋率 + 低爆炸半徑優先**。覆蓋率低者另置第 4 節。
+每項的執行前提是 CLAUDE.md 的 Refactor rules：行為不變、一次一種 transformation、一個 commit、
+每次跑 pytest 全綠。
+
+---
+
+## 1. 交叉驗證
+
+### 1.1 map 的判斷，數據支持的部分
+
+| map 的說法 | 支持的數據 | 強度 |
+|---|---|---|
+| `run.py` 是 god module | MI **0.00**（量表下限）、22 個 rank B+、CC 最高 55、573 行未覆蓋 | 強 |
+| `sources.py` 職責過寬 | MI **5.12**（C）、22 個 rank B+、373 行未覆蓋 | 強 |
+| 5 個死碼 | vulture 5 筆 + 覆蓋率獨立佐證：五者皆 1–12%，只有 `def` 那行在 import 時執行 | 強 |
+| TPEX V2 fetcher 三重複 | 三者覆蓋率 8% / 5% / 42%，都幾乎沒被走過 | 中 |
+| `_get_int_col` 兩份已分歧 | **覆蓋率讓問題更嚴重**：`prepare_twse_margin` 89%，`prepare_tpex_margin` **2%** | 強 |
+| `db.py` 低覆蓋但低風險 | 該檔 **0 個 rank B+**，平均 CC 1.75，未覆蓋的是直線程式碼 | 強 |
+
+死碼那項值得多說一句：vulture 是靜態分析、coverage 是動態執行，兩個獨立方法指向同一批
+函式，這比任何單一工具的結論可信。
+
+### 1.2 數據顯示有問題、但 map 沒提到的
+
+這是本次交叉驗證最大的收穫——**map 完全沒有函式層級的「複雜度 × 覆蓋率」交叉**，
+所以漏掉了一整類目標：
+
+| 函式 | CC | 覆蓋率 | fan-in | map 為何漏掉 |
+|---|---:|---:|---:|---|
+| `_dahu_command` (`run.py:277`) | 17 (C) | **2%** | 1 | map 只把它列為「4 個子命令」之一，沒看覆蓋率 |
+| `_fetch_and_upsert_market_daily` (`run.py:2166`) | 16 (C) | **2%** | 1 | **map 從頭到尾沒提過這個函式** |
+| `_get_margin_data` (`run.py:1415`) | 15 (C) | 21% | 1 | 同上，沒提過 |
+| `correct_prev_margin_balance` (`db_utils.py:542`) | 8 (B) | **4%** | 2 | map 只用「1 個資料修正邏輯」一語帶過 |
+| `upsert_holder_percent` (`db_utils.py:471`) | 7 (B) | **5%** | 2 | 沒提過 |
+| `_main_inner` (`run.py:2406`) | 32 (E) | 41% | 2 | map 只把它列進「最長函式表」，沒當成目標 |
+| `fetch_moneydj_margin` (`sources.py:1081`) | 15 (C) | **22%** | 5 | map 只提了它內部的 `_is_valid_date_row` 重複 |
+
+`_fetch_and_upsert_market_daily` 特別值得注意：CC 16、58 行、只有 1 行被覆蓋，
+且是唯一寫 `market_daily` 的路徑（CLAUDE.md 列為共用大盤表）。
+
+### 1.3 兩邊不一致的地方
+
+**（a）map 的優先級隱含結論是錯的。**
+map 第 6.2 節把 `_run_for_date`（CC 55, rank F）列為頭號問題，讀起來像是「先動它」。
+但加入覆蓋率後，`_run_for_date` 只有 **21%**——依你的排序規則它應該進「需先補測試」區，
+不能先動。真正符合「高複雜度 + 高覆蓋率 + 低爆炸半徑」的第一名是
+**`_fetch_ohlcv_with_fallback`：CC 32 (E)、覆蓋率 97%、內部只有 1 個呼叫點**。
+map 裡它只出現在長度表和 CC 表，從未被指認為優先目標。
+
+**（b）`sources.py` 的「爆炸半徑最大」需要修正措辭。**
+map 說它 fan-in 最高（`DataUnavailableError` 63 個 raise 點）。耦合的事實成立，
+但覆蓋率顯示這些 raise 點多半落在未覆蓋區間（`sources.py` 373 行未覆蓋，集中在
+524-757、964-1176、1325-1540）。所以正確的說法不是「動它會炸到很多有測試保護的地方」，
+而是**「動它會炸到很多沒有測試保護的地方」**——風險更高，不是更低。
+
+**（c）`prepare.py` 的檔案級指標掩蓋了雙峰分佈。**
+map 引 MI A (22.67) 說它「貼著 A/B 分界」。函式級數據顯示真相是兩極：
+`prepare_disposition` 100%、`prepare_twse_margin` 89%，對上
+`prepare_tpex_margin` **2%**、`prepare_tpex_margin_v2` **3%**、`prepare_moneydj_margin` **5%**。
+檔案平均 52% 不代表任何一個函式的實際狀態。
+
+**（d）map 說 `db.py` 覆蓋率 37% 需要「先確認再改」，這條可以放寬。**
+map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 節的 radon 數據
+（0 個 rank B+、平均 CC 1.75）顯示它是低分支直線程式碼。規則照舊要問你，
+但實際風險低於同樣覆蓋率的 `run.py` 未覆蓋區。
+
+---
+
+## 2. 優先執行區（覆蓋率足夠，可直接動）
+
+### [ ] P1 — 刪除 5 個死碼
+
+- **檔案／函式**：`run.py:2226 _run_for_date_no_write`(158行)、
+  `sources.py:614 fetch_tpex_daily_quotes`(34)、`sources.py:648 fetch_tpex_3insti`(34)、
+  `db_utils.py:60 upsert_stocks`(25)、`sources.py:404 find_twse_open_close`(16)
+- **transformation**：刪死碼
+- **覆蓋率**：1–12%（只有 `def` 行在 import 時執行）
+- **爆炸半徑**：**0**。vulture 靜態掃描 + 全 repo grep 雙重確認，每個名稱的參照數恰好是 1（自己的 def）
+- **預估收益**：`src/` 減少約 267 行（-4.4%）；`run.py` 移除一個 CC 38 的 rank E 函式；
+  `sources.py` 移除 3 個函式；vulture 報告歸零
+- **排序說明**：這項不符合「高覆蓋率優先」——死碼覆蓋率必然接近 0。但覆蓋率的作用是
+  「證明改動沒破壞行為」，而 fan-in = 0 時沒有行為可破壞，所以覆蓋率在此不適用。
+  收益／風險比最高，放第一
+- **建議拆法**：5 個獨立 commit，或至少 `run.py` / `sources.py` / `db_utils.py` 三個
+- **注意**：`upsert_stocks` 是唯一沒有底線前綴的，形式上算 public API。本套件 `__init__.py`
+  為空、唯一消費端是自己的 CLI，但刪除前值得你確認沒有外部腳本直接 import 它
+
+### [ ] P2 — `_fetch_ohlcv_with_fallback` extract method
+
+- **檔案／函式**：`run.py:1270-1389`
+- **transformation**：extract method
+- **覆蓋率**：**97%**（62 行執行 / 2 行未覆蓋）——全 repo 高複雜度函式中覆蓋最好的
+- **爆炸半徑**：**低**。LSP `findReferences` 共 13 refs：`src/` 內只有 `run.py:859` 一個呼叫點，
+  其餘 11 個在 3 個測試檔（`test_row_source_provider`、`test_run_ohlcv_change`、`test_run_ohlcv_source_order`）
+- **預估收益**：CC 32 (E) 是全 repo 第三高，拆成 3–4 個具名子函式後預期降到各 8–12 (B)。
+  這段是 OHLCV 多來源 fallback 順序，是最近效能改動（`7a3ed8b`）碰過的區域
+- **為何是第一順位的真正 refactor**：唯一同時滿足「CC ≥ 30」「覆蓋率 ≥ 90%」「src fan-in = 1」的函式
+- **紅線**：CLAUDE.md 明載 `change` 不可取自 `STOCK_DAY_ALL`、且 change 取得不可併進
+  `STOCK_DAY` 月表區塊的 `any(v is None ...)` 條件。拆函式時這兩條界線不能被合併掉
+
+### [ ] P3 — `_build_daily_rows` extract method
+
+- **檔案／函式**：`run.py:1068-1220`
+- **transformation**：extract method
+- **覆蓋率**：85%（47 執行 / 8 未覆蓋）
+- **爆炸半徑**：低—中。src 內 9 處提及、tests 17 處
+- **預估收益**：CC 31 (E) → 預期拆成 3 段各 10 左右；155 行是 `run.py` 第五長函式
+- **紅線**：`_stock_sources_ok` 的「逐檔跳過半套資料」語意、處置股欄位 `0` 哨兵值語意
+
+### [ ] P4 — `_fetch_disposition` extract method
+
+- **檔案／函式**：`run.py:560-636`
+- **transformation**：extract method
+- **覆蓋率**：**100%**（39/39）
+- **爆炸半徑**：低。src 5 處、tests 14 處（`test_disposition.py` 專門測它）
+- **預估收益**：CC 18 (C) → 預期 3 段各 6–8。100% 覆蓋讓這項幾乎零風險
+- **紅線**：45 天回看窗口（`_DISPOSITION_LOOKBACK_DAYS`）、`DispositionData.resolve` 的
+  三態語意（TRUE/FALSE/NULL 不可混為二態）
+
+### [ ] P5 — `_prefetch_symbol_ohlcv` extract method
+
+- **檔案／函式**：`run.py:1632-1725`
+- **transformation**：extract method
+- **覆蓋率**：**100%**（38/38）
+- **爆炸半徑**：低。src 4 處、tests 14 處（`test_prefetch_symbol_ohlcv.py` 專測）
+- **預估收益**：CC 12 (C) → 預期降到 A 級。96 行
+
+### [ ] P6 — `expand_twse_stock_day` / `expand_tpex_stock_day` 移出 `sources.py`
+
+- **檔案／函式**：`sources.py:441-476`、`sources.py:479-515`
+- **transformation**：拆模組（移動職責，不改邏輯）
+- **覆蓋率**：92% / **100%**
+- **爆炸半徑**：低。fan-in 各 7 / 8（src 2–3 + tests 5）
+- **預估收益**：這兩個函式不發任何 HTTP，輸入 DataFrame 輸出 DataFrame，是 `prepare.py`
+  的職責。移動後 `sources.py` 少 74 行，且是「拆 `sources.py`」這件大事最安全的第一刀
+- **注意**：兩者 CC 同為 6、結構同構，但**先移動、不要順手合併**——合併是另一種
+  transformation，依規則要分開的 commit；且只有 2 次重複，未達 CLAUDE.md 的 3 次門檻
+
+### [ ] P7 — 移除 `run.py` 三處多餘的 `import time`
+
+- **檔案／函式**：`run.py:124`、`run.py:192`、`run.py:256`
+- **transformation**：刪冗餘
+- **覆蓋率**：不適用（`_fetch_issued_shares_from_api` 等三個函式所在區段部分未覆蓋）
+- **爆炸半徑**：0。`time` 已在 `run.py:8` 頂層 import，函式內 import 純屬遮蔽
+- **預估收益**：3 行。收益很小，但零風險，適合當暖身或搭車 commit
+
+---
+
+## 3. 需要你先決定的（不是純 refactor）
+
+這兩項在 map 裡被歸為「重複」，但實際上是**語意分歧**，機械式合併會選錯一邊。
+
+### [ ] D1 — `_get_int_col` 兩份的防護不一致
+
+- **位置**：`prepare.py:436-440`（`if src_col:`）vs `prepare.py:512-516`（`if src_col and src_col in df.columns:`）
+- **覆蓋率**：`prepare_twse_margin` **89%** vs `prepare_tpex_margin` **2%**
+- **問題**：兩份其餘逐字相同，只差後者多一道 `and src_col in df.columns`。
+  是「TWSE 那邊漏了防護」還是「TPEX 那邊多此一舉」，從程式碼看不出來
+- **爆炸半徑**：中。`prepare_tpex_margin` 幾乎無測試，改錯不會被 pytest 抓到
+- **需要的動作**：先決定哪一邊是對的 → 補測試 → 才談合併
+
+### [ ] D2 — `stat` 有效性檢查有三套判準
+
+- **位置**：`!= "OK"`（`sources.py:392, 533, 900, 1331, 1361, 1386, 1403`）、
+  `not in {None, "OK"}`（`sources.py:591`，唯一一筆）、
+  `not in {None, "ok", "OK"}`（`sources.py:710, 731, 806, 1009, 1072`）
+- **問題**：同一個概念（payload 算不算有效）有三種寬鬆度。TWSE 多用嚴格版、TPEX V2 多用寬鬆版，
+  但 `sources.py:591`（MI_INDEX）是唯一的中間版
+- **相關風險**：CLAUDE.md 記載「TWSE 限流回應無法與『沒資料』區分」。統一判準會直接影響
+  這條界線，不是純樣式問題
+- **需要的動作**：確認三種寬鬆度是刻意的還是歷史累積，再決定要不要統一
+
+---
+
+## 4. 需先補測試（覆蓋率不足，不可直接動）
+
+依 CLAUDE.md `沒有測試覆蓋到的檔案，先跟我確認再改`。以下按「補測試的投報比」排序——
+CC 高、fan-in 低者優先，因為測試好寫、收益大。
+
+### [ ] T1 — `_run_for_date`
+
+- **位置**：`run.py:1765-2063`（308 行）
+- **CC / 覆蓋率**：**55 (F，全 repo 最高)** / **21%**（34 執行 / 127 未覆蓋）
+- **爆炸半徑**：高。src 4 處呼叫（`run.py:2525, 2587, 2607`）+ tests 6 處
+- **為何在這區**：CC 55 表示走完所有分支需 55 條獨立路徑，目前只覆蓋約五分之一。
+  這是全 repo 最需要重構、也最不能貿然重構的函式
+- **建議**：不要一次補到高覆蓋。先針對要動的那一段補，再動那一段
+
+### [ ] T2 — `_fetch_and_upsert_market_daily`
+
+- **位置**：`run.py:2166-2223`（58 行）
+- **CC / 覆蓋率**：16 (C) / **2%**（1 執行 / 41 未覆蓋）
+- **爆炸半徑**：**低**（src 1 個呼叫點、tests 0）
+- **為何優先**：低 fan-in + 高 CC + 幾乎零覆蓋 = 測試好寫、收益大。
+  且它是唯一寫 `market_daily` 的路徑（CLAUDE.md 列為共用表），目前完全沒有回歸保護
+- **map 漏掉這個函式，這是本次交叉驗證發現的最大缺口**
+
+### [ ] T3 — `_dahu_command`
+
+- **位置**：`run.py:277-348`（72 行）
+- **CC / 覆蓋率**：17 (C) / **2%**（1 執行 / 45 未覆蓋）
+- **爆炸半徑**：**最低**（src 1 處、tests 0）
+- **為何優先**：獨立子命令，邊界清楚，是整份清單裡最容易補測試的高 CC 函式
+
+### [ ] T4 — `_get_margin_data`
+
+- **位置**：`run.py:1415-1468`
+- **CC / 覆蓋率**：15 (C) / 21%
+- **爆炸半徑**：低（src 1 處、tests 0）
+
+### [ ] T5 — `correct_prev_margin_balance`
+
+- **位置**：`db_utils.py:542-612`（71 行）
+- **CC / 覆蓋率**：8 (B) / **4%**（1 執行 / 24 未覆蓋）
+- **爆炸半徑**：低（src 2 處、tests 0）
+- **為何值得補**：它做「前日／前前日餘額一致性修正」，是 `db_utils.py` 邏輯最繞的一段，
+  且與 `_consensus_prev_trade_date` 的 gap 處理耦合。無測試等於無保護
+
+### [ ] T6 — `prepare_tpex_margin` / `prepare_tpex_margin_v2`
+
+- **位置**：`prepare.py:478-557`、`prepare.py:560-635`
+- **CC / 覆蓋率**：14 (C) / **2%**、16 (C) / **3%**
+- **爆炸半徑**：低（各 src 3 處、tests 0）
+- **關聯**：D1 的分歧點在 `prepare.py:512`，就在這裡。補完測試才有辦法處理 D1
+
+### [ ] T7 — `fetch_moneydj_margin`
+
+- **位置**：`sources.py:1081-1176`
+- **CC / 覆蓋率**：15 (C) / **22%**
+- **爆炸半徑**：中（src 5 處、tests 9 處）
+- **不對稱**：孿生的 `fetch_moneydj_holding_pct` 覆蓋率 88%、CC 13。同一組邏輯，
+  一邊有保護一邊沒有。`_is_valid_date_row` 的重複（`sources.py:1141` / `1277`）就跨在這兩者之間
+
+### [ ] T8 — `upsert_holder_percent`
+
+- **位置**：`db_utils.py:471-516`
+- **CC / 覆蓋率**：7 (B) / **5%**
+- **爆炸半徑**：低（src 2 處、tests 0）
+
+### [ ] T9 — `_main_inner`
+
+- **位置**：`run.py:2406-2613`（212 行）
+- **CC / 覆蓋率**：32 (E) / 41%
+- **爆炸半徑**：低（src 1 處）但它是 CLI 總分派，改壞會影響所有子命令
+
+---
+
+## 5. 達到 3 次門檻、但要等前置條件
+
+CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。以下三項**已達門檻**，
+但覆蓋率不足以安全抽取，需等第 4 節相關項目完成。
+
+### [ ] X1 — HTTP 呼叫前置樣板（23 次）
+
+- **位置**：`sources.py` 全檔，`urllib3.disable_warnings(...)` 23 次、`verify=False` 23 次、
+  `raise_for_status()` 24 次
+- **transformation**：新增抽象層（已達 3 次門檻，是全 repo 最強的抽取理由）
+- **覆蓋率**：分散，多數落在 `sources.py` 未覆蓋的 373 行內
+- **爆炸半徑**：**最高**——動到所有 24 個 fetcher
+- **收益**：`sources.py` 預估減少 40–60 行；「停用 TLS 驗證」這個決定從 23 份收斂成 1 份
+- **前置**：建議排在最後。單一 commit 涵蓋 24 個 fetcher 違反「一次一種 transformation」的精神，
+  可考慮分批（TWSE 一批、TPEX 一批、MoneyDJ/TDCC 一批）
+
+### [ ] X2 — TPEX V2 fetcher 三重複
+
+- **位置**：`sources.py:698-715`、`719-757`、`993-1014`
+- **transformation**：新增抽象層（恰好 3 次，達門檻）
+- **覆蓋率**：8% / 5% / 42%
+- **爆炸半徑**：中（fan-in 6 / 2 / 5）
+- **前置**：三者覆蓋率都低，需先補測試
+
+### [ ] X3 — `db_utils.py` 連線樣板（16 次）
+
+- **位置**：`db_utils.py` 內 16 個 public 函式各自 `pool = get_pool(database_url)` + `with pool.connection()`
+- **transformation**：新增抽象層（16 次，遠超門檻）
+- **覆蓋率**：不均——`update_price_limits_batch` / `update_disposition_batch` 100%，
+  但 `upsert_holder_percent` 5%、`correct_prev_margin_balance` 4%、`upsert_stocks` 12%
+- **爆炸半徑**：高（LSP 確認 `get_pool` 20 refs，其中 16 個在此檔）
+- **前置**：需 T5 / T8 完成
+
+---
+
+## 6. 明確不做
+
+### [ ] N1 — 不合併 `update_price_limits_batch` / `update_disposition_batch`
+
+- **位置**：`db_utils.py:332-370`、`db_utils.py:373-413`
+- **理由**：兩者結構逐行同構、且**都是 100% 覆蓋**，技術上是最安全的合併對象。
+  但只重複 **2 次**，未達 CLAUDE.md 的 3 次門檻。條件成立（出現第三個批次 update）再說
+- 同理不做：`fetch_twse_taiex_ohlc` / `fetch_twse_market_volume`（2 次）、
+  `expand_twse_stock_day` / `expand_tpex_stock_day`（2 次，P6 只移動不合併）、
+  `_backfill_limits_command` / `_backfill_disposition_command`（2 次）、
+  `_parse_moneydj_date`（2 次）、`_is_valid_date_row`（2 次）
+
+### [ ] N2 — 暫不拆 `run.py` / `sources.py` 成多個模組
+
+- **理由**：map 指出兩者職責過寬（`run.py` MI 0.00、`sources.py` MI 5.12），拆模組是最終目標。
+  但拆模組會同時改動大量 import，違反「一次只做一種 transformation」，
+  且目前兩檔覆蓋率各 53% / 52%，沒有足夠的回歸保護
+- **前置**：P1–P7 與第 4 節完成後再評估。P6 是這個方向的第一小步
+
+---
+
+## 7. 建議執行順序
+
+```
+P1 (刪死碼, 5 commits)
+  └─ P7 (import time, 可搭車)
+P2 → P3 → P4 → P5        # 高覆蓋率的 extract method，風險遞增排列
+P6                        # 拆模組的第一刀
+D1 / D2                   # 需要你的決定
+T3 → T2 → T4 → T5 → T8    # 補測試，低 fan-in 優先
+T6 → D1 收尾
+T7 → T1 → T9
+X3 → X2 → X1              # 抽象層，爆炸半徑遞增
+N2 重新評估
+```
+
+第一輪（P1–P7）預估：`src/` 減少約 270 行，移除 1 個 rank E 函式，
+另外 4 個 E/C 函式降級，全程都在 85%+ 覆蓋率的保護下。

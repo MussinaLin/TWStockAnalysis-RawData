@@ -19,6 +19,7 @@ tw-stock-rawdata = "tw_stock_rawdata.run:main"
 [project.optional-dependencies]
 test = [
   "pytest>=8.0.0",
+  "pytest-cov>=7.0.0",
 ]
 
 [tool.pytest.ini_options]

@@ -272,4 +272,7 @@ docker compose --profile app run --rm rawdata --date 2025-10-15
 ```bash
 pip install -e ".[test]"
 pytest tests/unit/
+
+# 覆蓋率
+pytest --cov=src/tw_stock_rawdata --cov-report=term-missing
 ```
