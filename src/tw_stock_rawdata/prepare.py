@@ -745,6 +745,20 @@ def prepare_disposition(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=_DISPOSITION_COLUMNS)
 
 
+def _parse_moneydj_date(val) -> dt.date | None:
+    """MoneyDJ 的民國日期（如 115/02/11）轉西元；缺值或空字串回 None。
+
+    兩個 MoneyDJ normalize（融資融券 / 法人持股）共用。回 None 的列會在各自的
+    尾端被 dropna(subset=["date"]) 丟掉——MoneyDJ 表格常帶合計列與空列。
+    """
+    if pd.isna(val):
+        return None
+    text = str(val).strip()
+    if not text:
+        return None
+    return _parse_roc_date(text)
+
+
 def prepare_moneydj_margin(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare MoneyDJ margin trading data into standard format.
 
@@ -759,15 +773,6 @@ def prepare_moneydj_margin(df: pd.DataFrame) -> pd.DataFrame:
         raise DataUnavailableError("MoneyDJ 融資融券欄位解析失敗，缺少 date")
 
     result = pd.DataFrame()
-
-    # Parse ROC dates (民國, e.g., 115/02/11) to gregorian
-    def _parse_moneydj_date(val) -> dt.date | None:
-        if pd.isna(val):
-            return None
-        text = str(val).strip()
-        if not text:
-            return None
-        return _parse_roc_date(text)
 
     result["date"] = df["date"].map(_parse_moneydj_date)
 
@@ -804,14 +809,6 @@ def prepare_moneydj_holding_pct(df: pd.DataFrame) -> pd.DataFrame:
         raise DataUnavailableError("MoneyDJ 法人持股欄位解析失敗，缺少 date")
 
     result = pd.DataFrame()
-
-    def _parse_moneydj_date(val) -> dt.date | None:
-        if pd.isna(val):
-            return None
-        text = str(val).strip()
-        if not text:
-            return None
-        return _parse_roc_date(text)
 
     result["date"] = df["date"].map(_parse_moneydj_date)
 

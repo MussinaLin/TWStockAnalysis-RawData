@@ -857,6 +857,20 @@ def fetch_tpex_disposition(
     return _extract_tpex_v2_table(payload, "上櫃處置有價證券資訊")
 
 
+_MONEYDJ_ROC_DATE_RE = re.compile(r"^\d{2,3}/\d{1,2}/\d{1,2}$")
+
+
+def _is_moneydj_date_row(val) -> bool:
+    """MoneyDJ 表格的第一欄是否為民國日期（如 115/02/11）。
+
+    用來濾掉合計列、空列與其他非資料列——兩個 MoneyDJ fetcher（融資融券 /
+    法人持股）共用同一份判準。表格是靠位置取欄的，混進非資料列會整列錯位。
+    """
+    if pd.isna(val):
+        return False
+    return bool(_MONEYDJ_ROC_DATE_RE.match(str(val).strip()))
+
+
 @_retry_on_transient(
     attempts=PER_SYMBOL_RETRY_ATTEMPTS, max_delay=PER_SYMBOL_RETRY_MAX_DELAY
 )
@@ -919,15 +933,8 @@ def fetch_moneydj_margin(
     # Extract data rows (skip header rows 0-6)
     data_rows = target_table.iloc[7:].copy()
 
-    # Filter out summary rows (contain "合計" or non-date values in first column)
-    def _is_valid_date_row(val):
-        if pd.isna(val):
-            return False
-        text = str(val).strip()
-        # Valid ROC date format: 115/02/11
-        return bool(re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", text))
-
-    valid_mask = data_rows.iloc[:, 0].apply(_is_valid_date_row)
+    # 濾掉合計列與其他非資料列（見 _is_moneydj_date_row）
+    valid_mask = data_rows.iloc[:, 0].apply(_is_moneydj_date_row)
     data_rows = data_rows[valid_mask]
 
     if data_rows.empty:
@@ -1056,13 +1063,8 @@ def fetch_moneydj_holding_pct(
 
     data_rows = target_table.iloc[7:].copy()
 
-    def _is_valid_date_row(val):
-        if pd.isna(val):
-            return False
-        text = str(val).strip()
-        return bool(re.match(r"^\d{2,3}/\d{1,2}/\d{1,2}$", text))
-
-    valid_mask = data_rows.iloc[:, 0].apply(_is_valid_date_row)
+    # 濾掉合計列與其他非資料列（見 _is_moneydj_date_row）
+    valid_mask = data_rows.iloc[:, 0].apply(_is_moneydj_date_row)
     data_rows = data_rows[valid_mask]
 
     if data_rows.empty:
