@@ -376,12 +376,27 @@ TWSE 整批裡就直接回傳，即使有欄位是 NaN 也不去 TPEX 補（上�
 分開釘住，另驗證「balance 已一致但 change 仍 stale 也要修」這條容易被
 `if balance == api_balance: return` 之類的簡化誤刪的路徑。
 
-### [ ] T6 — `prepare_tpex_margin` / `prepare_tpex_margin_v2`
+### [x] T6 — `prepare_tpex_margin` / `prepare_tpex_margin_v2`
 
 - **位置**：`prepare.py:478-557`、`prepare.py:560-635`
 - **CC / 覆蓋率**：14 (C) / **2%**、16 (C) / **3%**
 - **爆炸半徑**：低（各 src 3 處、tests 0）
 - **關聯**：D1 的分歧點在 `prepare.py:512`，就在這裡。補完測試才有辦法處理 D1
+
+**實際結果**：兩半分別完成。`prepare_tpex_margin` 於 D1（commit 596dc22）補測試
+達 100%；`prepare_tpex_margin_v2` 於 2026-08-24 新增
+`tests/unit/test_prepare_tpex_margin_v2.py` 15 個案例，**3% → 100%**。
+
+V2 最容易壞的是欄位歧義修正：`_find_column` 用「包含」比對，而 API 回應裡
+`前資餘額(張)` 排在 `資餘額(張)` 之前，`資餘額` 會先比中前者；函式內有一段
+專門重找非「前」的那一欄。測試用真實欄位順序釘住它，並另加一個把兩欄對調的
+案例，確認修正邏輯不依賴特定排列。
+
+另涵蓋兩條 change 計算路徑（有前餘額欄時用餘額差、缺席時退回
+買−賣−償還、連償還欄都沒有時以 0 計而非 NaN）、券資比與 0 餘額、
+五個必填欄位各自缺席時拋 DataUnavailableError。
+
+`prepare.py` 全檔覆蓋率 52% → 75%。
 
 ### [ ] T7 — `fetch_moneydj_margin`
 
