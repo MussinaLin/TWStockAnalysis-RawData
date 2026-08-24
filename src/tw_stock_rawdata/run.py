@@ -2019,6 +2019,71 @@ def _fetch_margin_from_moneydj(
     return pd.DataFrame(margin_rows) if margin_rows else None
 
 
+def _fetch_day_all_source(
+    session: requests.Session,
+    date: dt.date,
+    today: dt.date,
+    sheet_name: str,
+) -> tuple[pd.DataFrame | None, dt.date | None]:
+    """STOCK_DAY_ALL（openapi 快照）。只在請求當日時抓——它沒有日期參數，
+    永遠回「最新一個交易日」，拿去對歷史日一定是錯的。
+
+    回傳 (已 normalize 的表或 None, 端點宣告的資料日期或 None)。第二個值
+    即使在資料被棄用時也照樣回傳——呼叫端的 twse_confirmed 閘門要用它判斷
+    這天到底是不是交易日。
+
+    與 _fetch_mi_index_source 刻意**不共用**：兩者的日期驗證政策不同
+    （這裡沒有「日期為 None 就當成今天」的 fallback，且對無法解析的日期有
+    專屬訊息），合併成參數化的共用函式只會把這個差異藏進參數裡。
+    """
+    if date != today:
+        return None, None
+
+    try:
+        with _phase(f"{sheet_name} TWSE STOCK_DAY_ALL"):
+            raw, data_date = fetch_twse_stock_day_all(session)
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"{sheet_name} TWSE STOCK_DAY_ALL 取得失敗：{exc}")
+        return None, None
+
+    if data_date is None:
+        print(f"{sheet_name} TWSE STOCK_DAY_ALL 無法解析日期，略過使用")
+        return None, data_date
+    if data_date != date:
+        print(f"{sheet_name} TWSE STOCK_DAY_ALL 日期不匹配：{data_date} != {date}")
+        return None, data_date
+    return prepare_twse_day_all(raw), data_date
+
+
+def _fetch_mi_index_source(
+    session: requests.Session,
+    date: dt.date,
+    today: dt.date,
+    sheet_name: str,
+) -> tuple[pd.DataFrame | None, dt.date | None]:
+    """MI_INDEX（全市場當日行情，涵蓋全部上市）。每天都抓，含歷史日。
+
+    與 STOCK_DAY_ALL 的差異在日期驗證：MI_INDEX 偶爾不宣告日期，這時若
+    **抓的就是今天**且確實有資料，就當成今天——歷史日不做這個推定，
+    因為那等於憑空假設端點回的是我們要的那天。
+    """
+    try:
+        with _phase(f"{sheet_name} TWSE MI_INDEX"):
+            raw, data_date = fetch_twse_mi_index(session, date)
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"{sheet_name} TWSE MI_INDEX 取得失敗：{exc}")
+        return None, None
+
+    if data_date is None and not raw.empty and date == today:
+        data_date = date
+
+    if data_date == date:
+        return prepare_twse_mi_index(raw), data_date
+    if data_date is not None:
+        print(f"{sheet_name} TWSE MI_INDEX 日期不匹配：{data_date} != {date}")
+    return None, data_date
+
+
 def _run_for_date(
     session: requests.Session,
     date: dt.date,
@@ -2102,36 +2167,12 @@ def _run_for_date(
         print(f"{sheet_name} TWSE 網路連線失敗：{exc}")
         return False
 
-    # Fetch TWSE STOCK_DAY_ALL (today only)
-    twse_day_all = None
-    twse_day_all_date = None
-    if date == today:
-        try:
-            with _phase(f"{sheet_name} TWSE STOCK_DAY_ALL"):
-                twse_day_all_raw, twse_day_all_date = fetch_twse_stock_day_all(session)
-            if twse_day_all_date is None:
-                print(f"{sheet_name} TWSE STOCK_DAY_ALL 無法解析日期，略過使用")
-            elif twse_day_all_date != date:
-                print(f"{sheet_name} TWSE STOCK_DAY_ALL 日期不匹配：{twse_day_all_date} != {date}")
-            else:
-                twse_day_all = prepare_twse_day_all(twse_day_all_raw)
-        except (DataUnavailableError, requests.RequestException) as exc:
-            print(f"{sheet_name} TWSE STOCK_DAY_ALL 取得失敗：{exc}")
-
-    # Fetch TWSE MI_INDEX
-    twse_mi_index = None
-    twse_mi_index_date = None
-    try:
-        with _phase(f"{sheet_name} TWSE MI_INDEX"):
-            twse_mi_index_raw, twse_mi_index_date = fetch_twse_mi_index(session, date)
-        if twse_mi_index_date is None and not twse_mi_index_raw.empty and date == today:
-            twse_mi_index_date = date
-        if twse_mi_index_date == date:
-            twse_mi_index = prepare_twse_mi_index(twse_mi_index_raw)
-        elif twse_mi_index_date is not None:
-            print(f"{sheet_name} TWSE MI_INDEX 日期不匹配：{twse_mi_index_date} != {date}")
-    except (DataUnavailableError, requests.RequestException) as exc:
-        print(f"{sheet_name} TWSE MI_INDEX 取得失敗：{exc}")
+    twse_day_all, twse_day_all_date = _fetch_day_all_source(
+        session, date, today, sheet_name
+    )
+    twse_mi_index, twse_mi_index_date = _fetch_mi_index_source(
+        session, date, today, sheet_name
+    )
 
     # Check if TWSE data is available
     twse_confirmed = (
