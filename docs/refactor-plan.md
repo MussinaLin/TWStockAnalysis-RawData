@@ -305,12 +305,26 @@ CC 高、fan-in 低者優先，因為測試好寫、收益大。
   且它是唯一寫 `market_daily` 的路徑（CLAUDE.md 列為共用表），目前完全沒有回歸保護
 - **map 漏掉這個函式，這是本次交叉驗證發現的最大缺口**
 
-### [ ] T3 — `_dahu_command`
+### [x] T3 — `_dahu_command`
 
 - **位置**：`run.py:277-348`（72 行）
 - **CC / 覆蓋率**：17 (C) / **2%**（1 執行 / 45 未覆蓋）
 - **爆炸半徑**：**最低**（src 1 處、tests 0）
 - **為何優先**：獨立子命令，邊界清楚，是整份清單裡最容易補測試的高 CC 函式
+
+**實際結果**（2026-08-24）：新增 `tests/unit/test_dahu_command.py` 14 個案例。
+`_dahu_command` **2% → 100%**，同批把兩個相鄰 helper 也補滿：
+`_resolve_dahu_dates` 100%、`_fetch_tdcc_with_retry` 87% → 100%。
+
+涵蓋：標的選取（`--stocks` 明列／空白與空項過濾／空值中止／改用 enabled 清單／
+清單為空中止）、日期解析（未給區間取最新一週／給區間取窗口內全部／窗口外不寫）、
+失敗處理（取 token 失敗即中止不寫／單檔連續失敗達 `_TDCC_MAX_ATTEMPTS` 後跳過該檔
+但不影響其他檔／大戶比例無法解析跳過／散戶比例 None 仍寫入，因 COALESCE 保護歷史值／
+股名空字串轉 None／換 token 也失敗時仍跑完重試不讓例外逸出）。
+
+不碰網路與 DB：`session` 傳 None，`load_stock_names` / `get_enabled_stocks` /
+`fetch_tdcc_*` / `prepare_tdcc_*` / `upsert_holder_percent` / `time.sleep` 全部
+monkeypatch，並記錄呼叫以斷言重試次數與寫入內容。
 
 ### [ ] T4 — `_get_margin_data`
 
