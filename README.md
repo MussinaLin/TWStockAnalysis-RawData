@@ -214,6 +214,26 @@ API（`逐檔組列` 階段耗時 224 秒 ≈ 217 × `TWSE_MIN_INTERVAL`），�
 TWSE 限流——而限流回應與「真的沒資料」是同一個字串，無法區分。`MI_INDEX` 本來就涵蓋
 全部上市股且同樣有五欄，提前之後同一情境的逐檔請求從 217 次降到 1 次。
 
+### 來源回應的驗證政策
+
+各端點回應的 `stat` 欄判準**刻意不統一**，分野有實測依據（2026-08-24 驗證）：
+
+- **TWSE 端點採嚴格判準**（`stat` 必須是 `"OK"`）。缺 `stat` 鍵也視為異常——實測
+  MI_INDEX 在交易日、休市日、無效參數、缺參數四種情境下一律回傳帶 `stat` 的 dict。
+- **TPEX 端點採寬鬆判準**（接受缺鍵與小寫 `"ok"`）。小寫 `ok` 確實只出現在 TPEX。
+
+**不要為了「統一」把 TWSE 放寬**：`www.twse.com.tw` 被限流時回 HTTP 200 +
+`{"stat":"很抱歉，沒有符合條件的資料!"}`，與「該日真的沒資料」是同一個字串，
+無法從回應區分。放寬判準只會讓異常 payload 更容易被當成有效資料。
+
+抓取的日期驗證同樣分兩種政策：
+
+- `STOCK_DAY_ALL` / `MI_INDEX` / TWSE 融資融券：資料日期不等於請求日期就**棄用**
+  （TWSE 尚未發布時會回前一日資料，寫下去等於把 D-1 標成 D）。
+- TPEX 整批：日期不符只印訊息、**資料照用**。
+- `MI_INDEX` 額外有一條 fallback：端點沒宣告日期但確實有資料、且抓的就是今天時，
+  視為今天；歷史日不做這個推定。
+
 ### 休市開關（config.is_trading_day）
 
 「純 daily 模式」（不帶任何參數）啟動時，會先讀共用 `config` 表（由下游
@@ -271,8 +291,32 @@ docker compose --profile app run --rm rawdata --date 2025-10-15
 
 ```bash
 pip install -e ".[test]"
-pytest tests/unit/
+pytest                     # 全部（638 個，無網路、無 DB）
 
 # 覆蓋率
 pytest --cov=src/tw_stock_rawdata --cov-report=term-missing
 ```
+
+測試不碰網路也不碰 DB：`tests/conftest.py` 提供兩組共用替身——
+
+- `FakeCursor` / `FakeConn` / `FakePool` + `install_fake_pool(monkeypatch, module, ...)`：
+  psycopg 連線池。注意 patch 要打在**呼叫 `get_pool` 的那個模組**（通常是 `db_utils`），
+  不是定義它的 `db`——`from .db import get_pool` 綁定的名稱不會被換掉。
+- `FakeResponse` / `FakeSession`：HTTP 回應，同時支援 `.text` 與 `.json()`，
+  並記錄每次 GET 的 `(url, params)` 供斷言。
+
+目前覆蓋率（`pytest --cov`）：
+
+| 模組 | 覆蓋率 |
+|---|---:|
+| `price_limit.py` | 100% |
+| `db_utils.py` | 99% |
+| `config.py` | 90% |
+| `run.py` | 85% |
+| `sources.py` | 81% |
+| `prepare.py` | 75% |
+| `db.py` | 37% |
+| **總計** | **83%** |
+
+`db.py` 偏低是因為它主體是 147 行的 schema DDL 字串與連線池，需要真的 DB 才走得到；
+其邏輯分支極少（radon 平均 CC 1.75，無任何 rank B 以上函式）。
