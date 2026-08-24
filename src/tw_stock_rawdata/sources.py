@@ -19,14 +19,6 @@ TWSE_STOCK_DAY_URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
 TWSE_T86_URL = "https://www.twse.com.tw/fund/T86"
 TWSE_STOCK_DAY_ALL_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TWSE_MI_INDEX_URL = "https://www.twse.com.tw/exchangeReport/MI_INDEX"
-TPEX_DAILY_QUOTES_URL = (
-    "https://www.tpex.org.tw/web/stock/aftertrading/DAILY_CLOSE_quotes/"
-    "stk_quote_result.php?l=zh-tw&o=data"
-)
-TPEX_3INSTI_URL = (
-    "https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
-    "3itrade_hedge_result.php?l=zh-tw&se=EW&t=D&o=data"
-)
 TPEX_DAILY_QUOTES_V2_URL = (
     "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
 )
@@ -289,10 +281,6 @@ def _date_to_roc(date: dt.date) -> str:
     return f"{date.year - 1911}/{date.month:02d}/{date.day:02d}"
 
 
-def _format_template(template: str, date: dt.date) -> str:
-    return template.format(date=date.isoformat(), roc=_date_to_roc(date))
-
-
 def _extract_twse_table(payload: dict[str, Any]) -> pd.DataFrame:
     """Extract the OHLCV table from TWSE MI_INDEX JSON payload.
 
@@ -399,22 +387,6 @@ def fetch_twse_stock_day(
 
     df = pd.DataFrame(data, columns=fields)
     return df
-
-
-def find_twse_open_close(df: pd.DataFrame, date: dt.date) -> tuple[float | None, float | None]:
-    """Extract (open, close) for a specific date from a STOCK_DAY DataFrame."""
-    if "日期" not in df.columns:
-        return None, None
-
-    df = df.copy()
-    df["_gregorian"] = df["日期"].map(_roc_to_date)
-    row = df.loc[df["_gregorian"] == date]
-    if row.empty:
-        return None, None
-
-    open_price = _clean_number(row.iloc[0].get("開盤價"))
-    close_price = _clean_number(row.iloc[0].get("收盤價"))
-    return open_price, close_price
 
 
 def find_twse_ohlcv(
@@ -612,74 +584,6 @@ def fetch_twse_mi_index(session: requests.Session, date: dt.date) -> tuple[pd.Da
                     break
 
     return _extract_twse_table(payload), data_date
-
-
-@_retry_on_transient
-def fetch_tpex_daily_quotes(
-    session: requests.Session,
-    date: dt.date | None = None,
-    template: str | None = None,
-) -> tuple[pd.DataFrame, dt.date | None]:
-    if date is not None:
-        if not template:
-            raise DataUnavailableError(
-                "未設定 TPEX_DAILY_QUOTES_URL_TEMPLATE，無法回補指定日期上櫃行情。"
-            )
-        url = _format_template(template, date)
-    else:
-        url = TPEX_DAILY_QUOTES_URL
-
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(url, timeout=30, verify=False)
-    response.raise_for_status()
-
-    content = response.content
-    for encoding in ("utf-8-sig", "cp950"):
-        try:
-            text = content.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            text = ""
-    if not text:
-        raise DataUnavailableError("TPEX 日行情解碼失敗")
-
-    data_date = _extract_first_date(text)
-    df = _read_tpex_csv(text)
-    return df, data_date
-
-
-@_retry_on_transient
-def fetch_tpex_3insti(
-    session: requests.Session,
-    date: dt.date | None = None,
-    template: str | None = None,
-) -> tuple[pd.DataFrame, dt.date | None]:
-    if date is not None:
-        if not template:
-            raise DataUnavailableError(
-                "未設定 TPEX_3INSTI_URL_TEMPLATE，無法回補指定日期上櫃三大法人。"
-            )
-        url = _format_template(template, date)
-    else:
-        url = TPEX_3INSTI_URL
-
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(url, timeout=30, verify=False)
-    response.raise_for_status()
-
-    content = response.content
-    for encoding in ("utf-8-sig", "cp950"):
-        try:
-            text = content.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            text = ""
-    if not text:
-        raise DataUnavailableError("TPEX 三大法人解碼失敗")
-
-    data_date = _extract_first_date(text)
-    df = _read_tpex_csv(text)
-    return df, data_date
 
 
 def _extract_tpex_v2_table(
