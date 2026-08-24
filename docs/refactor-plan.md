@@ -461,13 +461,33 @@ CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。
 - **前置**：建議排在最後。單一 commit 涵蓋 24 個 fetcher 違反「一次一種 transformation」的精神，
   可考慮分批（TWSE 一批、TPEX 一批、MoneyDJ/TDCC 一批）
 
-### [ ] X2 — TPEX V2 fetcher 三重複
+### [x] X2 — TPEX V2 fetcher 三重複
 
 - **位置**：`sources.py:698-715`、`719-757`、`993-1014`
 - **transformation**：新增抽象層（恰好 3 次，達門檻）
 - **覆蓋率**：8% / 5% / 42%
 - **爆炸半徑**：中（fan-in 6 / 2 / 5）
 - **前置**：三者覆蓋率都低，需先補測試
+
+**實際結果**（2026-08-24）：先補 `tests/unit/test_tpex_v2_fetchers.py` 27 個案例
+把三者由 8%/5%/42% 補到 **100%**，再抽出 `_fetch_tpex_v2`。
+
+三個 fetcher CC 各 6 → 1/1/2（皆 A），共用函式 A (4)。
+`sources.py` 的 `urllib3.disable_warnings` 與 `verify=False` 各由 21 降到 19，
+TPEX 的 stat 判準由 6 處降到 4 處。
+
+兩個刻意不做的決定寫在程式碼裡：
+- 3insti 的欄位位置改名**不下沉**到共用函式——那是該端點獨有的（欄名重複，
+  只能靠位置區分），放進共用流程會讓另外兩個 fetcher 讀起來像也需要它。
+- stat 判準沿用 TPEX 寬鬆版，docstring 註明不可為了「統一」收斂成 TWSE 嚴格版
+  （理由見 D2 實測）。這是抽共用函式最容易順手做錯的地方。
+
+驗證：以舊實作對 288 組輸入（三個 fetcher × 表格標題 × 四種 stat × 三種日期字串
+× 欄數 3/24 × 有無 stat 鍵）比對欄位、資料、data_date 與實際送出的請求參數，差異 0。
+
+**對 X1 的啟示**：這次抽取沒有踩到「差異落在語意層」的問題，因為三者確實只差
+參數。X1 的 23 處 HTTP 樣板橫跨 TWSE/TPEX/MoneyDJ/TDCC 四種來源，stat 判準、
+編碼處理、retry profile 都不同，不能照搬這個模式——需要先分群。
 
 ### [x] X3 — `db_utils.py` 連線樣板（15 次）
 
