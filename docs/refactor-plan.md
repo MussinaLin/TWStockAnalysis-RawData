@@ -340,11 +340,23 @@ CC 高、fan-in 低者優先，因為測試好寫、收益大。
 `fetch_tdcc_*` / `prepare_tdcc_*` / `upsert_holder_percent` / `time.sleep` 全部
 monkeypatch，並記錄呼叫以斷言重試次數與寫入內容。
 
-### [ ] T4 — `_get_margin_data`
+### [x] T4 — `_get_margin_data`
 
 - **位置**：`run.py:1415-1468`
 - **CC / 覆蓋率**：15 (C) / 21%
 - **爆炸半徑**：低（src 1 處、tests 0）
+
+**實際結果**（2026-08-24）：新增 `tests/unit/test_get_margin_data.py` 11 個案例，
+覆蓋率 **21% → 100%**。釘住的關鍵語意是「TWSE 命中即返回」——只要該檔出現在
+TWSE 整批裡就直接回傳，即使有欄位是 NaN 也不去 TPEX 補（上市股不該拿上櫃資料
+補洞）。這條靠 TWSE 分支尾端的 `return` 撐住，很容易在重構時被誤刪成 fall-through。
+
+有了 100% 防護網後，依新的兩次門檻順手合併函式內的逐字重複：兩段完全相同的
+填值迴圈提為 `_fill_margin_from(result, df, symbol) -> bool`（回傳是否命中），
+欄位清單提為模組常數 `_MARGIN_FIELDS`（原本以 dict literal 寫死一次、
+`result.keys()` 迭代兩次）。`_get_margin_data` CC **15 → 2 (A)**，
+`_fill_margin_from` B (8)。以舊實作對 147 組輸入（兩來源各 7 種形態 × 三個
+查詢代號）比對回傳 dict，差異 0。
 
 ### [ ] T5 — `correct_prev_margin_balance`
 

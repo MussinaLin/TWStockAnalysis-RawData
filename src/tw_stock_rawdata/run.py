@@ -1540,6 +1540,37 @@ def _get_institutional_data(
     return foreign_net, trust_net, dealer_net
 
 
+_MARGIN_FIELDS = (
+    "margin_buy", "margin_sell", "margin_balance", "margin_change",
+    "short_sell", "short_buy", "short_balance", "short_change",
+    "short_margin_ratio",
+)
+
+
+def _fill_margin_from(
+    result: dict[str, int | float | None],
+    df: pd.DataFrame | None,
+    symbol: str,
+) -> bool:
+    """由整批融資融券來源填入該檔的欄位；回傳是否命中該檔。
+
+    NaN 與缺席欄位一律留 None（不推測）。short_margin_ratio 是比例存 float，
+    其餘是張數存 int——兩者 DB 欄位型別不同，不可統一。
+    """
+    if df is None or df.empty:
+        return False
+    row = df.loc[df["symbol"] == symbol]
+    if row.empty:
+        return False
+    for key in _MARGIN_FIELDS:
+        if key not in row.columns:
+            continue
+        val = row.iloc[0][key]
+        if pd.notna(val):
+            result[key] = float(val) if key == "short_margin_ratio" else int(val)
+    return True
+
+
 def _get_margin_data(
     symbol: str,
     twse_margin: pd.DataFrame | None,
@@ -1552,47 +1583,14 @@ def _get_margin_data(
                             short_margin_ratio
     Units: lots (張), short_margin_ratio is ratio (1% = 0.01)
     """
-    result = {
-        "margin_buy": None,
-        "margin_sell": None,
-        "margin_balance": None,
-        "margin_change": None,
-        "short_sell": None,
-        "short_buy": None,
-        "short_balance": None,
-        "short_change": None,
-        "short_margin_ratio": None,
-    }
+    result: dict[str, int | float | None] = dict.fromkeys(_MARGIN_FIELDS)
 
-    # Try TWSE margin first
-    if twse_margin is not None and not twse_margin.empty:
-        row = twse_margin.loc[twse_margin["symbol"] == symbol]
-        if not row.empty:
-            for key in result.keys():
-                if key in row.columns:
-                    val = row.iloc[0][key]
-                    if pd.notna(val):
-                        # short_margin_ratio is a float (ratio), others are int
-                        if key == "short_margin_ratio":
-                            result[key] = float(val)
-                        else:
-                            result[key] = int(val)
-            return result
+    # TWSE 優先。命中即返回——即使該列有 NaN 也不去 TPEX 補：
+    # 上市股不該拿上櫃資料補洞。
+    if _fill_margin_from(result, twse_margin, symbol):
+        return result
 
-    # Try TPEX margin
-    if tpex_margin is not None and not tpex_margin.empty:
-        row = tpex_margin.loc[tpex_margin["symbol"] == symbol]
-        if not row.empty:
-            for key in result.keys():
-                if key in row.columns:
-                    val = row.iloc[0][key]
-                    if pd.notna(val):
-                        # short_margin_ratio is a float (ratio), others are int
-                        if key == "short_margin_ratio":
-                            result[key] = float(val)
-                        else:
-                            result[key] = int(val)
-
+    _fill_margin_from(result, tpex_margin, symbol)
     return result
 
 
