@@ -476,25 +476,52 @@ def _extract_tpex_v2_table(
     raise DataUnavailableError(f"TPEX V2 找不到包含「{title_keyword}」的表格。")
 
 
+def _fetch_tpex_v2(
+    session: requests.Session,
+    date: dt.date,
+    url: str,
+    table_keyword: str,
+    error_label: str,
+    extra_params: dict | None = None,
+) -> tuple[pd.DataFrame, dt.date | None]:
+    """TPEX V2 系列端點的共用抓取流程。
+
+    三個 V2 端點（行情 / 三大法人 / 融資融券）的請求與解析完全同構，只差 URL、
+    額外參數、表格標題關鍵字與錯誤訊息。
+
+    stat 判準沿用 TPEX 的寬鬆版（缺鍵與小寫 ok 都接受）——與 TWSE 端點的嚴格版
+    刻意不同，理由見 docs/refactor-plan.md D2 的實測紀錄，不可為了「統一」而收斂。
+
+    回傳 (DataFrame, payload 宣告的資料日期)；日期解析不出來時第二個值為 None，
+    由呼叫端比對後決定要不要採用。
+    """
+    params = {"date": _date_to_roc(date), "response": "json"}
+    if extra_params:
+        params.update(extra_params)
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    response = session.get(url, params=params, timeout=30, verify=False)
+    response.raise_for_status()
+    payload = response.json()
+
+    if payload.get("stat") not in {None, "ok", "OK"}:
+        raise DataUnavailableError(payload.get("stat") or error_label)
+
+    data_date = _parse_date_any(str(payload.get("date", "")))
+    return _extract_tpex_v2_table(payload, table_keyword), data_date
+
+
 @_retry_on_transient
 def fetch_tpex_daily_quotes_v2(
     session: requests.Session,
     date: dt.date,
 ) -> tuple[pd.DataFrame, dt.date | None]:
     """Fetch TPEX daily quotes using the new API that supports historical queries."""
-    roc = _date_to_roc(date)
-    params = {"date": roc, "response": "json"}
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TPEX_DAILY_QUOTES_V2_URL, params=params, timeout=30, verify=False)
-    response.raise_for_status()
-    payload = response.json()
-
-    if payload.get("stat") not in {None, "ok", "OK"}:
-        raise DataUnavailableError(payload.get("stat") or "TPEX V2 行情回傳異常")
-
-    data_date = _parse_date_any(str(payload.get("date", "")))
-    df = _extract_tpex_v2_table(payload, "上櫃股票")
-    return df, data_date
+    return _fetch_tpex_v2(
+        session, date, TPEX_DAILY_QUOTES_V2_URL,
+        table_keyword="上櫃股票",
+        error_label="TPEX V2 行情回傳異常",
+    )
 
 
 @_retry_on_transient
@@ -503,18 +530,12 @@ def fetch_tpex_3insti_v2(
     date: dt.date,
 ) -> tuple[pd.DataFrame, dt.date | None]:
     """Fetch TPEX 3-institutional-investors data using the new API."""
-    roc = _date_to_roc(date)
-    params = {"date": roc, "response": "json", "type": "Daily", "se": "EW"}
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TPEX_3INSTI_V2_URL, params=params, timeout=30, verify=False)
-    response.raise_for_status()
-    payload = response.json()
-
-    if payload.get("stat") not in {None, "ok", "OK"}:
-        raise DataUnavailableError(payload.get("stat") or "TPEX V2 三大法人回傳異常")
-
-    data_date = _parse_date_any(str(payload.get("date", "")))
-    df = _extract_tpex_v2_table(payload, "三大法人")
+    df, data_date = _fetch_tpex_v2(
+        session, date, TPEX_3INSTI_V2_URL,
+        table_keyword="三大法人",
+        error_label="TPEX V2 三大法人回傳異常",
+        extra_params={"type": "Daily", "se": "EW"},
+    )
 
     # The fields have duplicated names (買進股數/賣出股數/買賣超股數 repeated for each
     # institutional category). Rename by position:
@@ -781,19 +802,11 @@ def fetch_tpex_margin_v2(
     Returns DataFrame and data date. The DataFrame has Chinese column names
     (代號, 資買, 資賣, 資餘額, 前資餘額, 券賣, 券買, 券餘額, 前券餘額, etc.).
     """
-    roc = _date_to_roc(date)
-    params = {"date": roc, "response": "json"}
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TPEX_MARGIN_V2_URL, params=params, timeout=30, verify=False)
-    response.raise_for_status()
-    payload = response.json()
-
-    if payload.get("stat") not in {None, "ok", "OK"}:
-        raise DataUnavailableError(payload.get("stat") or "TPEX V2 融資融券回傳異常")
-
-    data_date = _parse_date_any(str(payload.get("date", "")))
-    df = _extract_tpex_v2_table(payload, "上櫃股票")
-    return df, data_date
+    return _fetch_tpex_v2(
+        session, date, TPEX_MARGIN_V2_URL,
+        table_keyword="上櫃股票",
+        error_label="TPEX V2 融資融券回傳異常",
+    )
 
 
 @_retry_on_transient
