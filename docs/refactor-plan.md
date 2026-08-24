@@ -450,7 +450,7 @@ EXCLUDED 覆寫（那是本次要更新的主資料）。另涵蓋空 rows／全
 CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。以下三項**已達門檻**，
 但覆蓋率不足以安全抽取，需等第 4 節相關項目完成。
 
-### [~] X1 — HTTP 呼叫前置樣板（TWSE 群已完成，其餘待辦）
+### [x] X1 — HTTP 呼叫前置樣板（TWSE / TPEX / MoneyDJ 完成，TDCC 維持現狀）
 
 - **位置**：`sources.py` 全檔，`urllib3.disable_warnings(...)` 23 次、`verify=False` 23 次、
   `raise_for_status()` 24 次
@@ -495,6 +495,42 @@ CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。
   `fetch_tpex_disposition`，另有 `_fetch_tpex_v2` 已自成一群。
 - MoneyDJ：兩個 fetcher，走 `read_html`、PER_SYMBOL retry profile。
 - TDCC：兩個 fetcher，需要 token 鏈接，其中一個是 POST 而非 GET。
+
+
+---
+
+**X1 收尾（2026-08-24）**：TPEX 與 MoneyDJ 兩批完成，TDCC 刻意維持現狀。
+
+`_twse_get` 泛化為 `_http_get`——它本來就沒有任何 TWSE 專屬邏輯，只是名字取窄了。
+現涵蓋 TWSE 群（10 處）、TPEX 群（4 處 + `_fetch_tpex_v2` 內部）、MoneyDJ（2 處）。
+
+累計收斂（以 X2 完成時 e55948d 為基準）：
+
+| 樣板 | 起點 | 完成 |
+|---|---:|---:|
+| `urllib3.disable_warnings` | 21 | **3** |
+| `verify=False` | 21 | **6** |
+| `raise_for_status` | 22 | **6** |
+
+**三處刻意不納入**：
+
+| 對象 | 理由 |
+|---|---|
+| `fetch_twse_disposition` | 唯一沒有 `verify=False` 的端點，納入會改變其 TLS 行為 |
+| `fetch_tdcc_distribution` | 是 `POST(data=...)`，要納入得給 `_http_get` 加 method 參數——為一個呼叫點擴大共用函式的職責 |
+| `fetch_tdcc_token_and_dates` | 形狀相同但只遷移它會讓 TDCC 那一對不對稱（同一組流程一半用 helper 一半不用），且兩者覆蓋率僅 6% / 4% |
+
+前置測試：`test_twse_request_shape.py` 24 個 + `test_tpex_request_shape.py` 20 個，
+只涵蓋「請求怎麼送、回應怎麼進入解析」這一層。過程中兩次靠測試發現原本以為
+一致的地方其實不同：`fetch_twse_stock_day` 在 `json()` 前多一道空白 body 檢查
+（限流防護）、`fetch_tpex_stock_day` 的參數是 `code` 且日期用西元（程式碼註解
+標為「坑 1/2」，原本只有註解沒有測試）。這兩點都直接影響 helper 該抽到哪一層。
+
+驗證：三批各自以舊實作做差異測試，共 120 + 135 + 24 = 279 組輸入，差異 0。
+
+**取捨記錄**：`verify=False` 集中之後，改動會同時影響 TWSE / TPEX / MoneyDJ 三家
+上游。若日後只想對其中一家恢復憑證驗證，得先把 `_http_get` 拆開。這點已寫進
+它的 docstring。
 
 ### [x] X2 — TPEX V2 fetcher 三重複
 
