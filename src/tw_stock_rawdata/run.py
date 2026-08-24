@@ -2084,6 +2084,79 @@ def _fetch_mi_index_source(
     return None, data_date
 
 
+def _fetch_tpex_batch(
+    session: requests.Session,
+    date: dt.date,
+    sheet_name: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """TPEX 整批（日行情 + 三大法人）。整批失敗時回**帶欄位的空表**而非 None。
+
+    空表而非 None 是刻意的：下游一律以 `df.loc[df["symbol"] == ...]` 查表，
+    沒有欄位的空表會在那裡丟 KeyError。回空表則自然變成「查無此檔」，
+    上市股照樣寫得進去——TPEX 掛掉不該讓整天不寫。
+
+    日期不符只印訊息、資料照用：這與 TWSE 那兩個來源的政策不同（那邊會棄用），
+    是既有行為，此處原樣保留。
+    """
+    tpex_quotes = None
+    tpex_3insti = None
+    try:
+        with _phase(f"{sheet_name} TPEX 整批（日行情＋三大法人）"):
+            tpex_quotes, tpex_quotes_date, tpex_3insti, tpex_3insti_date = _fetch_tpex_sources(
+                session, date
+            )
+        if tpex_quotes_date and tpex_quotes_date != date:
+            print(f"{sheet_name} TPEX 日行情日期不匹配：{tpex_quotes_date} != {date}")
+        if tpex_3insti_date and tpex_3insti_date != date:
+            print(f"{sheet_name} TPEX 三大法人日期不匹配：{tpex_3insti_date} != {date}")
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"{sheet_name} TPEX 資料取得失敗：{exc}")
+        tpex_quotes = None
+        tpex_3insti = None
+
+    if tpex_quotes is None:
+        tpex_quotes = pd.DataFrame(
+            columns=["symbol", "name", "open", "close", "high", "low", "volume"]
+        )
+    if tpex_3insti is None:
+        tpex_3insti = pd.DataFrame(
+            columns=["symbol", "name", "foreign_net", "trust_net", "dealer_net"]
+        )
+    return tpex_quotes, tpex_3insti
+
+
+def _fetch_holding_pct_per_symbol(
+    session: requests.Session,
+    date: dt.date,
+    sheet_name: str,
+    holdings: pd.DataFrame,
+) -> dict[str, dict[dt.date, dict]]:
+    """逐檔抓外資／法人持股佔比，組成與預取 cache 同形狀的 dict。
+
+    daily 模式不帶 cache，故此處是逐檔對 MoneyDJ 各打一次。失敗一律吞掉——
+    持股佔比不納入 _stock_sources_ok，抓不到不該讓整檔個股跳過不寫。
+    非 date 型別的列跳過：MoneyDJ 表格常帶合計列，混進去會讓 cache 的鍵不是日期。
+    """
+    cache: dict[str, dict[dt.date, dict]] = {}
+    with _phase(f"{sheet_name} 外資/法人持股佔比（逐檔 {len(holdings)} 檔）"):
+        for _, item in holdings.iterrows():
+            symbol = str(item["symbol"]).strip()
+            try:
+                raw = fetch_moneydj_holding_pct(session, symbol, date, date)
+                df = prepare_moneydj_holding_pct(raw)
+                cache[symbol] = {}
+                for _, row in df.iterrows():
+                    row_date = row["date"]
+                    if isinstance(row_date, dt.date):
+                        cache[symbol][row_date] = {
+                            "foreign_holding_pct": row.get("foreign_holding_pct"),
+                            "insti_holding_pct": row.get("insti_holding_pct"),
+                        }
+            except (DataUnavailableError, requests.RequestException):
+                pass
+    return cache
+
+
 def _run_for_date(
     session: requests.Session,
     date: dt.date,
@@ -2184,51 +2257,16 @@ def _run_for_date(
         print(f"{sheet_name} TWSE 資料不足，視為休市，略過寫入")
         return False
 
-    # Fetch TPEX data
-    try:
-        with _phase(f"{sheet_name} TPEX 整批（日行情＋三大法人）"):
-            tpex_quotes, tpex_quotes_date, tpex_3insti, tpex_3insti_date = _fetch_tpex_sources(
-                session, date
-            )
-        if tpex_quotes_date and tpex_quotes_date != date:
-            print(f"{sheet_name} TPEX 日行情日期不匹配：{tpex_quotes_date} != {date}")
-        if tpex_3insti_date and tpex_3insti_date != date:
-            print(f"{sheet_name} TPEX 三大法人日期不匹配：{tpex_3insti_date} != {date}")
-    except (DataUnavailableError, requests.RequestException) as exc:
-        print(f"{sheet_name} TPEX 資料取得失敗：{exc}")
-        tpex_quotes = None
-        tpex_3insti = None
-
-    if tpex_quotes is None:
-        tpex_quotes = pd.DataFrame(columns=["symbol", "name", "open", "close", "high", "low", "volume"])
-    if tpex_3insti is None:
-        tpex_3insti = pd.DataFrame(columns=["symbol", "name", "foreign_net", "trust_net", "dealer_net"])
+    tpex_quotes, tpex_3insti = _fetch_tpex_batch(session, date, sheet_name)
 
     twse_margin, tpex_margin = _resolve_margin_sources(
         session, date, today, sheet_name, holdings, margin_cache
     )
 
-    # Fetch holding percentage data (per-stock, when not using cache)
-    # daily 模式不帶 cache，故此處是逐檔對 MoneyDJ 各打一次；失敗一律吞掉，
-    # 沒有計時就完全看不出它在整段啟動時間裡佔多少。
     if holding_pct_cache is None:
-        holding_pct_cache = {}
-        with _phase(f"{sheet_name} 外資/法人持股佔比（逐檔 {len(holdings)} 檔）"):
-            for _, item in holdings.iterrows():
-                symbol = str(item["symbol"]).strip()
-                try:
-                    raw = fetch_moneydj_holding_pct(session, symbol, date, date)
-                    df = prepare_moneydj_holding_pct(raw)
-                    holding_pct_cache[symbol] = {}
-                    for _, row in df.iterrows():
-                        row_date = row["date"]
-                        if isinstance(row_date, dt.date):
-                            holding_pct_cache[symbol][row_date] = {
-                                "foreign_holding_pct": row.get("foreign_holding_pct"),
-                                "insti_holding_pct": row.get("insti_holding_pct"),
-                            }
-                except (DataUnavailableError, requests.RequestException):
-                    pass
+        holding_pct_cache = _fetch_holding_pct_per_symbol(
+            session, date, sheet_name, holdings
+        )
 
     # 處置股名單。backfill 由呼叫端整段預取一次（見 _main_inner），daily / 單日模式
     # 在此自抓當日窗口，兩市場各一次 HTTP。刻意不納入 _stock_sources_ok：處置只是
