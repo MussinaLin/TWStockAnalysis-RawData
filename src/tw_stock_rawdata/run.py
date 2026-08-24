@@ -1059,6 +1059,67 @@ class PerSymbolRangeProvider:
         return [symbol for symbol, ok in self._insti_ok.items() if not ok]
 
 
+def _to_lots(value):
+    """股數轉張數。None 原樣回傳（缺值不推測），NaN 由 // 自然傳遞。"""
+    return value // 1000 if value is not None else None
+
+
+def _insti_total_lots(foreign_lots, trust_lots, dealer_lots):
+    """三大法人合計（張）。三者皆缺時回 None，不當成 0。"""
+    if foreign_lots is None and trust_lots is None and dealer_lots is None:
+        return None
+    return (foreign_lots or 0) + (trust_lots or 0) + (dealer_lots or 0)
+
+
+def _turnover_rate(volume, issued_shares: dict[str, int] | None, symbol: str):
+    """成交量 / 發行股數。發行股數缺席或非正數時回 None。
+
+    條件寫成正向的 `shares > 0` 而非 `not (shares <= 0)`：兩者對 NaN 不等價
+    （NaN 的 `>` 與 `<=` 同時為 False），取補集會讓 NaN 漏進除法。
+    """
+    if not issued_shares or volume is None:
+        return None
+    shares = issued_shares.get(symbol)
+    if shares and shares > 0:
+        return round(volume / shares, 6)
+    return None
+
+
+def _short_margin_ratio(margin_balance, short_balance):
+    """券資比。融資餘額非正數（含缺值 / NaN）時回 None，不做除法。
+
+    條件寫成正向的 `margin_balance > 0`，理由同 _turnover_rate：
+    NaN 的 `>` 與 `<=` 同時為 False，寫成補集會讓 NaN 漏進除法算出 NaN。
+    """
+    if margin_balance is not None and margin_balance > 0 and short_balance is not None:
+        return round(short_balance / margin_balance, 6)
+    return None
+
+
+def _resolve_margin_data(
+    symbol: str,
+    date: dt.date,
+    margin_cache: dict[str, dict[dt.date, dict]] | None,
+    twse_margin: pd.DataFrame | None,
+    tpex_margin: pd.DataFrame | None,
+) -> dict:
+    """融資融券：優先用逐檔預抓的 cache，沒有才回頭查當日整批。"""
+    if margin_cache is not None and symbol in margin_cache and date in margin_cache[symbol]:
+        return margin_cache[symbol][date]
+    return _get_margin_data(symbol, twse_margin, tpex_margin)
+
+
+def _resolve_holding_pct(
+    symbol: str,
+    date: dt.date,
+    holding_pct_cache: dict[str, dict[dt.date, dict]] | None,
+) -> dict:
+    """外資 / 法人持股比例：只從逐檔預抓的 cache 取，沒有就回空 dict。"""
+    if holding_pct_cache is not None and symbol in holding_pct_cache:
+        return holding_pct_cache[symbol].get(date, {})
+    return {}
+
+
 def _build_daily_rows(
     *,
     date: dt.date,
@@ -1136,44 +1197,25 @@ def _build_daily_rows(
             )
 
         foreign_net, trust_net, dealer_net = provider.insti(symbol, date)
-
-        if margin_cache is not None and symbol in margin_cache and date in margin_cache[symbol]:
-            margin_data = margin_cache[symbol][date]
-        else:
-            margin_data = _get_margin_data(symbol, twse_margin, tpex_margin)
-
-        # Convert volume to lots (張)
-        volume_lots = volume // 1000 if volume is not None else None
-
-        # Convert institutional flows to lots
-        foreign_net_lots = foreign_net // 1000 if foreign_net is not None else None
-        trust_net_lots = trust_net // 1000 if trust_net is not None else None
-        dealer_net_lots = dealer_net // 1000 if dealer_net is not None else None
-        insti_total_lots = (
-            None
-            if foreign_net_lots is None and trust_net_lots is None and dealer_net_lots is None
-            else (foreign_net_lots or 0) + (trust_net_lots or 0) + (dealer_net_lots or 0)
+        margin_data = _resolve_margin_data(
+            symbol, date, margin_cache, twse_margin, tpex_margin
         )
 
-        # turnover_rate (volume / issued_shares)
-        turnover_rate = None
-        if issued_shares and volume is not None:
-            shares = issued_shares.get(symbol)
-            if shares and shares > 0:
-                turnover_rate = round(volume / shares, 6)
+        volume_lots = _to_lots(volume)
+        foreign_net_lots = _to_lots(foreign_net)
+        trust_net_lots = _to_lots(trust_net)
+        dealer_net_lots = _to_lots(dealer_net)
+        insti_total_lots = _insti_total_lots(
+            foreign_net_lots, trust_net_lots, dealer_net_lots
+        )
 
-        # short_margin_ratio
+        turnover_rate = _turnover_rate(volume, issued_shares, symbol)
+
         margin_balance = margin_data.get("margin_balance")
         short_balance = margin_data.get("short_balance")
-        short_margin_ratio = None
-        if margin_balance is not None and margin_balance > 0:
-            if short_balance is not None:
-                short_margin_ratio = round(short_balance / margin_balance, 6)
+        short_margin_ratio = _short_margin_ratio(margin_balance, short_balance)
 
-        # holding_pct
-        holding_pct = {}
-        if holding_pct_cache is not None and symbol in holding_pct_cache:
-            holding_pct = holding_pct_cache[symbol].get(date, {})
+        holding_pct = _resolve_holding_pct(symbol, date, holding_pct_cache)
 
         rows.append({
             "symbol": symbol,
