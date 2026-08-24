@@ -674,12 +674,47 @@ CLAUDE.md 的抽象門檻由三次改為**兩次**：確認邏輯相同就重用
 這四組的共通點是**差異落在語意層而非參數層**，機械式合併會把「兩個東西不一樣」
 這個事實藏進 if 分支或字串參數裡。建議個別評估，不隨新門檻自動合併。
 
-### [ ] N2 — 暫不拆 `run.py` / `sources.py` 成多個模組
+### [ ] N2 — 拆 `run.py` / `sources.py` 成多個模組（**延後，保留待辦**）
 
-- **理由**：map 指出兩者職責過寬（`run.py` MI 0.00、`sources.py` MI 5.12），拆模組是最終目標。
-  但拆模組會同時改動大量 import，違反「一次只做一種 transformation」，
-  且目前兩檔覆蓋率各 53% / 52%，沒有足夠的回歸保護
-- **前置**：P1–P7 與第 4 節完成後再評估。P6 是這個方向的第一小步
+2026-08-24：**使用者決定先不做，留待日後**。以下記錄當時的評估，供重啟時參考。
+
+#### 前置條件已大幅改善
+
+| 指標 | 本輪起點 | 現在 |
+|---|---|---|
+| `run.py` 覆蓋率 | 53% | **85%** |
+| `sources.py` 覆蓋率 | 52% | **81%** |
+| `run.py` 最大函式 | `_run_for_date` 299 行 / CC 55 (F) | `_run_date_batch` 117 行 / CC 12 (C) |
+| `sources.py` MI | C (5.12) | **B (15.14)** |
+| `run.py` rank D 以上 | 5 個 | 1 個（`_main_inner` E(32)） |
+
+當初列為「暫不做」的兩個理由——覆蓋率不足、以及函式太大不好搬——都已經解除。
+
+#### 但它仍是風險最高的一項
+
+- **無法用前面那套驗證方法。** T1、X1、X3 每一步都能以 `git show HEAD` 的舊實作與新
+  實作對同一組輸入比對 stdout 與副作用（合計超過 1,500 組，抓到過兩個真的行為改變）。
+  拆模組動的是 import 拓樸，沒有等價的逐函式比對可做，只能靠既有測試。
+- **`run.py` 仍是 2,780 行、72 個頂層符號**，MI 依然是 C (0.00)——那是量表下限，
+  代表它即使拆完 `_run_for_date` 仍然過大。真正的問題是它同時裝了 CLI、四個子命令、
+  provider 抽象層、領域邏輯（漲跌停、處置）、快取層與編排。
+- **`prepare.py` 對 `sources.py` 的私有名稱依賴**（`_clean_int` / `_clean_number` /
+  `_parse_roc_date` / `_parse_roc_date_compact` / `_roc_to_date`）在 P6 之後又多一個。
+  拆模組前應該先決定這些解析原語的歸屬（見 `docs/refactor-map.md` §2）。
+
+#### 重啟時的建議切入點
+
+1. **先處理解析原語的歸屬**——把 `sources.py` 的 `_clean_*` / `_parse_*` / `_roc_*`
+   移到一個中性模組，解除 `prepare.py` 的私有跨模組 import。這一步可以獨立驗證。
+2. **再從 `run.py` 切出邊界最清楚的一塊**：四個子命令（`_update_shares_command` /
+   `_dahu_command` / `_backfill_limits_command` / `_backfill_disposition_command`）
+   彼此獨立、各有專屬測試（`_dahu_command` 與 `_fetch_and_upsert_market_daily` 皆 100%），
+   搬出去只影響 `_main_inner` 一個呼叫端。
+3. **provider 那一組**（`RowSourceProvider` / `BatchSourceProvider` /
+   `PerSymbolRangeProvider` 與相關的 prefetch 函式）是第二塊，邊界也清楚。
+4. **`_run_date_batch` 與編排留在最後**——它們與 CLI 的耦合最深。
+
+前置未解：`_main_inner` 仍是 CC 32 (E)（覆蓋率 100%，但拆模組會大幅改動它）。
 
 ---
 
@@ -695,7 +730,7 @@ T3 → T2 → T4 → T5 → T8    # 補測試，低 fan-in 優先
 T6 → D1 收尾
 T7 → T1 → T9
 X3 → X2 → X1              # 抽象層，爆炸半徑遞增
-N2 重新評估
+N2 延後（2026-08-24 決定，見該節記錄）
 ```
 
 第一輪（P1–P7）預估：`src/` 減少約 270 行，移除 1 個 rank E 函式，
