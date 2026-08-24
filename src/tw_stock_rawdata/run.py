@@ -2174,62 +2174,115 @@ def _run_for_date(
     disposition: DispositionData | None = None,
     provider: RowSourceProvider | None = None,
 ) -> bool:
-    """Process data for a single date.
+    """處理單一日期，回傳是否有寫入。守衛 + 分派兩條實作路徑。
+
+    這裡是兩條**互不相干**的路徑的共同入口，只有前面的守衛是共用的：
+
+    - `provider` 有給 → `_run_date_per_symbol`：來源已整段預取完畢
+      （`--backfill-stocks`），跳過所有全市場批次 HTTP 與 twse_confirmed 判斷，
+      交易日由 provider 的月表資料決定，也不碰 market_daily。
+    - `provider` 沒給 → `_run_date_batch`：daily / 一般日期範圍回補，
+      當場抓四組全市場批次來源，並以 twse_confirmed 判斷這天是不是交易日。
 
     write_market_daily: 是否寫入全市場大盤資料 (market_daily)。market_daily 以
-    trade_date 為鍵、與個股無關；--backfill-stocks（特定股票回補）會傳 False，
-    避免對共用的大盤表產生非預期副作用。一般日期範圍回補與 daily 模式維持 True。
-
-    provider: 已預取好的來源。傳入時**完全跳過所有全市場批次 HTTP**
-    （T86 / MI_INDEX / TPEX quotes / TPEX 3insti）以及 twse_confirmed 判斷，
-    直接用它組列——`--backfill-stocks` 走這條路，交易日由 provider 的月表資料
-    決定（該日無價格就不寫該檔）。不傳時維持現行行為。
+    trade_date 為鍵、與個股無關；`--backfill-stocks` 傳 False，避免對共用的
+    大盤表產生非預期副作用。一般日期範圍回補與 daily 模式維持 True。
     """
     sheet_name = date.isoformat()
     print(f"開始處理日期 {sheet_name}")
 
-    # Skip weekends
     if date.weekday() >= 5:
         print(f"{sheet_name} 週末休市，略過寫入")
         return False
 
-    # Skip existing sheets in backfill mode
     if skip_existing and sheet_name in sheet_names:
         print(f"已存在 {sheet_name}，略過回補。")
         return False
 
-    # per-stock 模式：來源已整段預取完畢，跳過所有全市場批次 HTTP。
-    # 交易日不再靠 twse_confirmed 判定 —— 該檔該日有沒有交易由月表資料決定
-    # （provider.ohlcv 回全 None → _build_daily_rows 因無價格跳過該列）。
     if provider is not None:
-        if disposition is None:
-            with _phase(f"{sheet_name} 處置股名單"):
-                disposition = _fetch_disposition(session, date, date)
+        return _run_date_per_symbol(
+            session=session, date=date, sheet_name=sheet_name, holdings=holdings,
+            sheet_names=sheet_names, config=config, provider=provider,
+            issued_shares=issued_shares, margin_cache=margin_cache,
+            holding_pct_cache=holding_pct_cache, name_map=name_map,
+            disposition=disposition,
+        )
 
-        with _phase(f"{sheet_name} 逐檔組列（{len(holdings)} 檔）"):
-            output_df = _build_daily_rows(
-                date=date,
-                holdings=holdings,
-                provider=provider,
-                issued_shares=issued_shares,
-                margin_cache=margin_cache,
-                holding_pct_cache=holding_pct_cache,
-                name_map=name_map,
-                disposition=disposition,
-            )
+    return _run_date_batch(
+        session=session, date=date, sheet_name=sheet_name, holdings=holdings,
+        sheet_names=sheet_names, twse_month_cache=twse_month_cache, config=config,
+        today=today, issued_shares=issued_shares, margin_cache=margin_cache,
+        holding_pct_cache=holding_pct_cache, name_map=name_map,
+        write_market_daily=write_market_daily, disposition=disposition,
+    )
 
-        if output_df.empty or output_df["close"].isna().all():
-            print(f"{sheet_name} 無可寫入資料（該日無交易或來源取得失敗）。")
-            return False
 
-        sheet_names.add(sheet_name)
-        with _phase(f"{sheet_name} 寫入 stock_daily_raw（{len(output_df)} 列）"):
-            upsert_daily_raw(config.database_url, date, output_df)
+def _run_date_per_symbol(
+    *,
+    session: requests.Session,
+    date: dt.date,
+    sheet_name: str,
+    holdings: pd.DataFrame,
+    sheet_names: set[str],
+    config: AppConfig,
+    provider: RowSourceProvider,
+    issued_shares: dict[str, int] | None,
+    margin_cache: dict[str, dict[dt.date, dict]] | None,
+    holding_pct_cache: dict[str, dict[dt.date, dict]] | None,
+    name_map: dict[str, str] | None,
+    disposition: DispositionData | None,
+) -> bool:
+    """`--backfill-stocks` 路徑：來源已整段預取，零全市場批次 HTTP。
 
-        # market_daily 與個股無關，per-stock 回補不動它（維持既有不變量）。
-        return True
+    不做 twse_confirmed 判斷——該檔該日有沒有交易由月表資料決定
+    （provider.ohlcv 回全 None → _build_daily_rows 因無價格跳過該列）。
+    也不碰 market_daily：那張表以 trade_date 為鍵、與個股無關，逐檔回補去動它
+    會對共用資料產生非預期副作用（CLAUDE.md 不變量）。
+    """
+    if disposition is None:
+        with _phase(f"{sheet_name} 處置股名單"):
+            disposition = _fetch_disposition(session, date, date)
 
-    # Fetch TWSE 3-institutional data
+    with _phase(f"{sheet_name} 逐檔組列（{len(holdings)} 檔）"):
+        output_df = _build_daily_rows(
+            date=date,
+            holdings=holdings,
+            provider=provider,
+            issued_shares=issued_shares,
+            margin_cache=margin_cache,
+            holding_pct_cache=holding_pct_cache,
+            name_map=name_map,
+            disposition=disposition,
+        )
+
+    if output_df.empty or output_df["close"].isna().all():
+        print(f"{sheet_name} 無可寫入資料（該日無交易或來源取得失敗）。")
+        return False
+
+    sheet_names.add(sheet_name)
+    with _phase(f"{sheet_name} 寫入 stock_daily_raw（{len(output_df)} 列）"):
+        upsert_daily_raw(config.database_url, date, output_df)
+    return True
+
+
+def _run_date_batch(
+    *,
+    session: requests.Session,
+    date: dt.date,
+    sheet_name: str,
+    holdings: pd.DataFrame,
+    sheet_names: set[str],
+    twse_month_cache: dict[tuple[str, dt.date], pd.DataFrame],
+    config: AppConfig,
+    today: dt.date,
+    issued_shares: dict[str, int] | None,
+    margin_cache: dict[str, dict[dt.date, dict]] | None,
+    holding_pct_cache: dict[str, dict[dt.date, dict]] | None,
+    name_map: dict[str, str] | None,
+    write_market_daily: bool,
+    disposition: DispositionData | None,
+) -> bool:
+    """daily / 一般日期範圍回補路徑：當場抓四組全市場批次來源再組列。"""
     try:
         with _phase(f"{sheet_name} TWSE 三大法人"):
             twse_3insti = _fetch_twse_3insti(session, date)
@@ -2237,6 +2290,8 @@ def _run_for_date(
         print(f"{sheet_name} TWSE 資料尚未公告或取得失敗：{exc}")
         twse_3insti = pd.DataFrame(columns=["symbol", "foreign_net", "trust_net", "dealer_net"])
     except requests.RequestException as exc:
+        # 連線失敗與「尚未公告」不同：後者可能只是還沒到公告時間，前者代表這次
+        # 執行環境有問題，繼續往下打其他來源只是浪費請求。
         print(f"{sheet_name} TWSE 網路連線失敗：{exc}")
         return False
 
@@ -2247,7 +2302,7 @@ def _run_for_date(
         session, date, today, sheet_name
     )
 
-    # Check if TWSE data is available
+    # 三個來源任一確認有當日資料就算交易日；全都沒有才視為休市。
     twse_confirmed = (
         (twse_day_all_date == date)
         or (twse_mi_index_date == date)
@@ -2277,10 +2332,6 @@ def _run_for_date(
 
     # 三大法人來源健康度（已過 twse_confirmed，交易日下「空」＝該來源 fetch 失敗）。
     # 逐檔寫入時用來決定該市場個股是否跳過（融資融券非必要，不納入）。
-    twse_insti_ok = not twse_3insti.empty
-    tpex_insti_ok = not tpex_3insti.empty
-
-    # Build daily data
     with _phase(f"{sheet_name} 逐檔組列（{len(holdings)} 檔）"):
         provider = BatchSourceProvider(
             session=session,
@@ -2290,8 +2341,8 @@ def _run_for_date(
             tpex_quotes=tpex_quotes,
             tpex_3insti=tpex_3insti,
             twse_month_cache=twse_month_cache,
-            twse_insti_ok=twse_insti_ok,
-            tpex_insti_ok=tpex_insti_ok,
+            twse_insti_ok=not twse_3insti.empty,
+            tpex_insti_ok=not tpex_3insti.empty,
         )
         output_df = _build_daily_rows(
             date=date,
@@ -2319,14 +2370,14 @@ def _run_for_date(
     with _phase(f"{sheet_name} 寫入 stock_daily_raw（{len(output_df)} 列）"):
         upsert_daily_raw(config.database_url, date, output_df)
 
-    # Fetch and upsert market daily data (大盤行情)。market_daily 與個股無關，
-    # 特定股票回補 (--backfill-stocks) 不需更新，避免對共用大盤表的非預期副作用。
+    # market_daily 與個股無關，以 trade_date 為鍵；--backfill-stocks 走另一條路，
+    # 那條路完全不會到這裡。
     if write_market_daily:
         with _phase(f"{sheet_name} 大盤行情 market_daily"):
             _fetch_and_upsert_market_daily(session, date, config)
 
-    # Daily 模式（非 backfill）下，用 MoneyDJ 修正 D-1 個股融資融券
-    # backfill 已透過 _prefetch_margin_cache 預取修正版，不需再修
+    # Daily 模式（非 backfill）下，用 MoneyDJ 修正 D-1 個股融資融券。
+    # backfill 已透過 _prefetch_margin_cache 預取修正版，不需再修。
     if margin_cache is None:
         _refresh_prev_day_margin(session, holdings, date, config)
 
