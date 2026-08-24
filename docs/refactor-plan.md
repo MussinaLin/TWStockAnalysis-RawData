@@ -73,7 +73,13 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 
 ## 2. 優先執行區（覆蓋率足夠，可直接動）
 
-### [ ] P1 — 刪除 5 個死碼
+> **P1–P7 已於 2026-08-24 全部完成**（commit 637feb6 … aadfa3c，另 3a58c29 為 P1 的
+> 連鎖孤兒收尾）。結果：rank D 以上函式 5 → 2（剩下的 `_run_for_date` 55/F 與
+> `_main_inner` 32/E 都在第 4 節，未動）；`sources.py` MI 由 C (5.12) 升為 B (9.94)；
+> vulture 全 src 掃描零回報；測試 368 → 366（新增 7、刪除 9 個測已無人呼叫的死碼）。
+> 逐項實測數字見各項下方的「實際結果」。
+
+### [x] P1 — 刪除 5 個死碼
 
 - **檔案／函式**：`run.py:2226 _run_for_date_no_write`(158行)、
   `sources.py:614 fetch_tpex_daily_quotes`(34)、`sources.py:648 fetch_tpex_3insti`(34)、
@@ -90,7 +96,9 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 - **注意**：`upsert_stocks` 是唯一沒有底線前綴的，形式上算 public API。本套件 `__init__.py`
   為空、唯一消費端是自己的 CLI，但刪除前值得你確認沒有外部腳本直接 import 它
 
-### [ ] P2 — `_fetch_ohlcv_with_fallback` extract method
+**實際結果**：刪除 5 個死碼共 267 行。連鎖效應超出原估——刪掉兩個 V1 TPEX fetcher 後，`_format_template` 與兩個 V1 URL 常數同時失去唯一呼叫端（無測試，同批刪除）；`_read_tpex_csv`（CC 16）與 `_extract_first_date` 亦成孤兒，因有既有測試而延後，已於 commit 3a58c29 連同 9 個測試一併刪除。`upsert_stocks` 的外部依賴已查證：下游 TWStockAnalysis 只在 split plan 的 docs 提到本 repo，無程式碼 import，且其自身已無此函式。`sources.py` 1540 → 1322 行。
+
+### [x] P2 — `_fetch_ohlcv_with_fallback` extract method
 
 - **檔案／函式**：`run.py:1270-1389`
 - **transformation**：extract method
@@ -103,7 +111,9 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 - **紅線**：CLAUDE.md 明載 `change` 不可取自 `STOCK_DAY_ALL`、且 change 取得不可併進
   `STOCK_DAY` 月表區塊的 `any(v is None ...)` 條件。拆函式時這兩條界線不能被合併掉
 
-### [ ] P3 — `_build_daily_rows` extract method
+**實際結果**：CC 32 (E) → **11 (C)**，抽出 `_find_symbol_row` A(4)、`_ohlcv_from_row` A(1)、`_fill_missing_ohlcv` B(6)、`_fill_ohlcv_from_stock_day` B(8)、`_lookup_change` A(4)。各來源觸發條件留在主函式，CLAUDE.md 兩條紅線因此保持；`_lookup_change` 讓「change 是獨立區塊」從註解約定變成結構保證。除既有測試外另跑差異測試：舊實作 vs 新實作對 513 組輸入（來源缺席/NaN 組合 × market_type 三態 × STOCK_DAY 成功失敗 × cache 冷熱）比對回傳值，差異 0。
+
+### [x] P3 — `_build_daily_rows` extract method
 
 - **檔案／函式**：`run.py:1068-1220`
 - **transformation**：extract method
@@ -112,7 +122,9 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 - **預估收益**：CC 31 (E) → 預期拆成 3 段各 10 左右；155 行是 `run.py` 第五長函式
 - **紅線**：`_stock_sources_ok` 的「逐檔跳過半套資料」語意、處置股欄位 `0` 哨兵值語意
 
-### [ ] P4 — `_fetch_disposition` extract method
+**實際結果**：CC 31 (E) → **9 (B)**，抽出 `_to_lots` A(2)、`_insti_total_lots` B(7)、`_turnover_rate` A(5)、`_short_margin_ratio` A(4)、`_resolve_margin_data` A(4)、`_resolve_holding_pct` A(3)。`_to_lots` 是唯一達 3 次門檻的抽取（4 個呼叫點）。**差異測試抓到一個我自己引入的錯誤**：把 `if margin_balance > 0` 改寫成 `if margin_balance <= 0: return None` 在 NaN 下不等價（NaN 的 `>` 與 `<=` 同時為 False，取補集會讓 NaN 漏進除法），`_turnover_rate` 的 `shares > 0` 同理。兩處改回正向條件並就地註明；窮舉 60 組後差異 0。
+
+### [x] P4 — `_fetch_disposition` extract method
 
 - **檔案／函式**：`run.py:560-636`
 - **transformation**：extract method
@@ -122,7 +134,9 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 - **紅線**：45 天回看窗口（`_DISPOSITION_LOOKBACK_DAYS`）、`DispositionData.resolve` 的
   三態語意（TRUE/FALSE/NULL 不可混為二態）
 
-### [ ] P5 — `_prefetch_symbol_ohlcv` extract method
+**實際結果**：CC 18 (C) → **4 (A)**，抽出 `_fetch_market_disposition_frames` A(3)、`_merge_disposition_minutes` A(5)、`_expand_disposition_frames` B(6)、`_print_disposition_summary` A(4)。三層巢狀迴圈（市場 → frame → row → 逐日）攤平成具名步驟；`market_ok` 的「全部窗口都成功才算 ok」與「同檔多筆取最小分鐘數」各自獨立成函式並就地寫明理由。原本即 100% 覆蓋。
+
+### [x] P5 — `_prefetch_symbol_ohlcv` extract method
 
 - **檔案／函式**：`run.py:1632-1725`
 - **transformation**：extract method
@@ -130,7 +144,9 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 - **爆炸半徑**：低。src 4 處、tests 14 處（`test_prefetch_symbol_ohlcv.py` 專測）
 - **預估收益**：CC 12 (C) → 預期降到 A 級。96 行
 
-### [ ] P6 — `expand_twse_stock_day` / `expand_tpex_stock_day` 移出 `sources.py`
+**實際結果**：CC 12 (C) → **6 (B)**，抽出 `_month_has_trading` A(2) 與兩個具名 closure（`fetch_month_probing` / `rescue_from_other_market`）。**抽取讓兩條未測路徑現形**：覆蓋率一度由 100% 掉到 96%，因為原本隱式 fall-through 的邊界（市場別未定調且兩市場皆回空 → 跨市場補救無從進行）變成顯式 `return`。補 2 個測試後回到 100%，並確認該情境只打兩發、不會多打第三發。
+
+### [x] P6 — `expand_twse_stock_day` / `expand_tpex_stock_day` 移出 `sources.py`
 
 - **檔案／函式**：`sources.py:441-476`、`sources.py:479-515`
 - **transformation**：拆模組（移動職責，不改邏輯）
@@ -141,13 +157,17 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 - **注意**：兩者 CC 同為 6、結構同構，但**先移動、不要順手合併**——合併是另一種
   transformation，依規則要分開的 commit；且只有 2 次重複，未達 CLAUDE.md 的 3 次門檻
 
-### [ ] P7 — 移除 `run.py` 三處多餘的 `import time`
+**實際結果**：兩個函式移入 `prepare.py`，`sources.py` 自此不再有任何純 DataFrame 重塑函式（`find_twse_ohlcv` 因與 STOCK_DAY 月表格式強耦合暫留）。依 N1 只移動不合併，已於 `prepare.py` 就地註明。代價如預期：`prepare.py` 對 `sources.py` 的私有名稱依賴多一個 `_roc_to_date`。`sources.py` 1448 → 1371、`prepare.py` 955 → 1042。
+
+### [x] P7 — 移除 `run.py` 三處多餘的 `import time`
 
 - **檔案／函式**：`run.py:124`、`run.py:192`、`run.py:256`
 - **transformation**：刪冗餘
 - **覆蓋率**：不適用（`_fetch_issued_shares_from_api` 等三個函式所在區段部分未覆蓋）
 - **爆炸半徑**：0。`time` 已在 `run.py:8` 頂層 import，函式內 import 純屬遮蔽
 - **預估收益**：3 行。收益很小，但零風險，適合當暖身或搭車 commit
+
+**實際結果**：移除 3 行。`time` 已在 `run.py:8` 頂層 import。
 
 ---
 
@@ -157,7 +177,7 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
 
 這兩項在 map 裡被歸為「重複」，但實際上是**語意分歧**，機械式合併會選錯一邊。
 
-### [ ] D1 — `_get_int_col` 兩份的防護不一致（追查後：**純樣式差異，非潛在 bug**）
+### [x] D1 — `_get_int_col` 兩份的防護不一致（追查後：**純樣式差異，非潛在 bug**）
 
 - **位置**：`prepare.py:436-440`（`if src_col:`）vs `prepare.py:512-516`（`if src_col and src_col in df.columns:`）
 - **覆蓋率**：`prepare_twse_margin` **89%** vs `prepare_tpex_margin` **2%**
@@ -176,6 +196,29 @@ map 第 5 節依 CLAUDE.md 規則把 `db.py` 列入需確認清單，但第 6.4 
   同時回報 `Type "Series | DataFrame" is not assignable to return type "Series"`。
   當 `df` 有同名重複欄位時 `df[src_col]` 回傳 DataFrame 而非 Series，`.map()` 會爆。
   這個風險兩份都有，加 `in df.columns` 也擋不掉——它檢查的是「存不存在」，不是「唯不唯一」。
+
+**實際結果**（2026-08-24 完成）：冗餘檢查在 `prepare_tpex_margin` 內其實有**三處**，
+不只 `_get_int_col`——另兩處是 `margin_cash_col and margin_cash_col in df.columns`
+（原 535）與 `short_stock_col and short_stock_col in df.columns`（原 551），
+成因與判斷完全相同，一併移除。兩份 `_get_int_col` 現已逐字相同。
+不變量已寫在 `cols` 建構處，說明為何不需要 `in df.columns`。
+
+依 CLAUDE.md「重複三次以上才抽象」，兩份 `_get_int_col` 只重複兩次，**未合併成
+共用函式**，只是讓它們一致。
+
+先補測試再動：新增 `tests/unit/test_prepare_tpex_margin.py` 9 個案例
+（欄位齊全／選填欄缺席／必填欄缺席／大小寫不一致／缺 symbol／值不可解析），
+`prepare_tpex_margin` 覆蓋率 **2% → 100%**。另跑差異測試：舊實作 vs 新實作對
+299 組輸入（丟棄 0~2 個選填欄的所有組合 × 大小寫 × 多餘欄 × 壞值，加三種空表
+邊界）比對回傳的完整 DataFrame，差異 0。
+
+**過程中的額外發現（未修，超出 D1 範圍）**：`prepare_twse_margin` 的
+`if margin_buy is not None and margin_sell is not None:`（現 451）恆為真——
+`_get_int_col` 永遠回傳 Series（欄位缺席時回一整排 None），不可能是 None，
+故其 `else: result["margin_change"] = None` 分支不可達。實際輸出仍是 None
+（None 相減經 `map` 後轉回 None），行為無誤，但那道 guard 是死碼。
+對應的 `prepare_tpex_margin` 檢查的是欄位名（`if margin_buy_col and ...`），
+可以真的走到 else。兩者形似而語意不同，值得單獨評估。
 
 ### [x] D2 — `stat` 有效性檢查有三套判準（**已實測結案**）
 

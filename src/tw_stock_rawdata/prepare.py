@@ -497,6 +497,10 @@ def prepare_tpex_margin(df: pd.DataFrame) -> pd.DataFrame:
     }
 
     # Find actual column names (case insensitive)
+    # 不變量：df_cols_lower 的值全部取自 df.columns，故 cols 的每個值必定是
+    # df 的真實欄位或 None。下面各處只需檢查真假，不需要再 `in df.columns`
+    # ——那是恆為真的冗餘檢查（prepare_twse_margin 走 _find_columns，
+    # 回傳的也是 df.columns 的成員或 None，同樣的不變量）。
     df_cols_lower = {c.lower(): c for c in df.columns}
     cols = {}
     for std_name, tpex_name in col_mapping.items():
@@ -512,7 +516,7 @@ def prepare_tpex_margin(df: pd.DataFrame) -> pd.DataFrame:
 
     def _get_int_col(col_name: str) -> pd.Series:
         src_col = cols.get(col_name)
-        if src_col and src_col in df.columns:
+        if src_col:
             return df[src_col].map(_clean_int)
         return pd.Series([None] * len(df))
 
@@ -532,7 +536,7 @@ def prepare_tpex_margin(df: pd.DataFrame) -> pd.DataFrame:
         margin_buy = df[margin_buy_col].map(_clean_int)
         margin_sell = df[margin_sell_col].map(_clean_int)
         margin_change = margin_buy - margin_sell
-        if margin_cash_col and margin_cash_col in df.columns:
+        if margin_cash_col:
             margin_cash = df[margin_cash_col].map(_clean_int)
             margin_change = margin_change - margin_cash.fillna(0)
         result["margin_change"] = margin_change.map(lambda x: int(x) if pd.notna(x) else None)
@@ -548,7 +552,7 @@ def prepare_tpex_margin(df: pd.DataFrame) -> pd.DataFrame:
         short_sell_raw = df[short_sell_col].map(_clean_int)
         short_buy_raw = df[short_buy_col].map(_clean_int)
         short_change = short_sell_raw - short_buy_raw
-        if short_stock_col and short_stock_col in df.columns:
+        if short_stock_col:
             short_stock = df[short_stock_col].map(_clean_int)
             short_change = short_change - short_stock.fillna(0)
         result["short_change"] = short_change.map(lambda x: int(x) if pd.notna(x) else None)
