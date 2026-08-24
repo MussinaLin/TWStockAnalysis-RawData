@@ -300,20 +300,24 @@ def _extract_twse_table(payload: dict[str, Any]) -> pd.DataFrame:
     raise DataUnavailableError("TWSE MI_INDEX 無法找到行情表格。")
 
 
-def _twse_get(
+def _http_get(
     session: requests.Session,
     url: str,
     params: dict | None = None,
 ) -> requests.Response:
-    """送出一個 www.twse.com.tw / openapi.twse.com.tw 請求並確認 HTTP 狀態。
+    """送出交易所端點的 GET 請求並確認 HTTP 狀態。TWSE 與 TPEX 兩群共用。
 
     抽出的是各 fetcher 完全一致的那三行（停用自簽憑證警告 → GET(timeout=30,
     verify=False) → raise_for_status），**不含**回應的解析：各端點在這之後差異
     很大（stat 判準有嚴格與寬鬆兩種、有的先看 response.text 是否空白、有的要
-    改編碼、有的回 list 而非 dict），把那些一併吞進來只會讓差異藏進參數裡。
+    改編碼、有的回 list 而非 dict、有的要驗月份回聲），把那些一併吞進來只會讓
+    真正的差異藏進參數裡。
 
-    verify=False 是既有行為：TWSE 的憑證鏈在部分環境驗不過。集中在此之後，
-    日後要改回驗證只需動一個地方，而不是散在二十幾處。
+    verify=False 是既有行為：兩家交易所的憑證鏈在部分環境都驗不過。集中在此
+    之後，日後要改回驗證只需動一個地方。
+
+    不涵蓋 fetch_twse_disposition（該端點沒有 verify=False，納入會改變其 TLS
+    行為）、MoneyDJ 與 TDCC 兩群（見 docs/refactor-plan.md X1）。
 
     raise_for_status 的例外原樣往外拋，由 _retry_on_transient 判斷是否重試。
     """
@@ -342,7 +346,7 @@ def fetch_twse_stock_day(
         "date": month_start.strftime("%Y%m%d"),
         "stockNo": stock_no,
     }
-    response = _twse_get(session, TWSE_STOCK_DAY_URL, params)
+    response = _http_get(session, TWSE_STOCK_DAY_URL, params)
     if not response.text.strip():
         raise DataUnavailableError("TWSE STOCK_DAY 回傳空白")
     try:
@@ -393,7 +397,7 @@ def fetch_twse_t86(session: requests.Session, date: dt.date) -> pd.DataFrame:
         "date": date.strftime("%Y%m%d"),
         "selectType": "ALL",
     }
-    response = _twse_get(session, TWSE_T86_URL, params)
+    response = _http_get(session, TWSE_T86_URL, params)
     payload = response.json()
     if payload.get("stat") != "OK":
         raise DataUnavailableError(payload.get("stat") or "TWSE T86 回傳異常")
@@ -413,7 +417,7 @@ def fetch_twse_stock_day_all(session: requests.Session) -> tuple[pd.DataFrame, d
     Returns (DataFrame of all stocks, data_date). data_date is extracted from
     the first record's Date field; None if unparseable.
     """
-    response = _twse_get(session, TWSE_STOCK_DAY_ALL_URL)
+    response = _http_get(session, TWSE_STOCK_DAY_ALL_URL)
     payload = response.json()
     if not isinstance(payload, list):
         raise DataUnavailableError("TWSE STOCK_DAY_ALL 回傳格式異常")
@@ -447,7 +451,7 @@ def fetch_twse_mi_index(session: requests.Session, date: dt.date) -> tuple[pd.Da
         "date": date.strftime("%Y%m%d"),
         "type": "ALLBUT0999",
     }
-    response = _twse_get(session, TWSE_MI_INDEX_URL, params)
+    response = _http_get(session, TWSE_MI_INDEX_URL, params)
     payload = response.json()
     # 型別檢查必須在 payload.get() 之前：回傳 JSON 陣列時 list 沒有 .get，
     # 先取值會丟 AttributeError 而非 DataUnavailableError，繞過既有錯誤處理。
@@ -514,10 +518,7 @@ def _fetch_tpex_v2(
     if extra_params:
         params.update(extra_params)
 
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(url, params=params, timeout=30, verify=False)
-    response.raise_for_status()
-    payload = response.json()
+    payload = _http_get(session, url, params).json()
 
     if payload.get("stat") not in {None, "ok", "OK"}:
         raise DataUnavailableError(payload.get("stat") or error_label)
@@ -613,9 +614,7 @@ def fetch_tpex_stock_day(
         "date": f"{month_start.year}/{month_start.month:02d}/01",
         # 坑 2：不加 response=json
     }
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TPEX_STOCK_DAY_URL, params=params, timeout=30, verify=False)
-    response.raise_for_status()
+    response = _http_get(session, TPEX_STOCK_DAY_URL, params)
     try:
         payload = response.json()
     except (ValueError, requests.exceptions.JSONDecodeError):
@@ -637,7 +636,7 @@ def fetch_tpex_stock_day(
 
 def fetch_twse_company_basic(session: requests.Session) -> pd.DataFrame:
     """Fetch TWSE listed company basic info including issued shares."""
-    response = _twse_get(session, TWSE_COMPANY_BASIC_URL)
+    response = _http_get(session, TWSE_COMPANY_BASIC_URL)
 
     content = response.content
     for encoding in ("utf-8-sig", "cp950", "big5"):
@@ -655,9 +654,7 @@ def fetch_twse_company_basic(session: requests.Session) -> pd.DataFrame:
 
 def fetch_tpex_company_basic(session: requests.Session) -> pd.DataFrame:
     """Fetch TPEX OTC company basic info including issued shares."""
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TPEX_COMPANY_BASIC_URL, timeout=30, verify=False)
-    response.raise_for_status()
+    response = _http_get(session, TPEX_COMPANY_BASIC_URL)
     payload = response.json()
 
     if not isinstance(payload, list):
@@ -758,7 +755,7 @@ def fetch_twse_margin(
         "date": date.strftime("%Y%m%d"),
         "selectType": "ALL",
     }
-    response = _twse_get(session, TWSE_MARKET_MARGIN_URL, params)
+    response = _http_get(session, TWSE_MARKET_MARGIN_URL, params)
     return _parse_twse_margin_all_payload(response.json())
 
 
@@ -771,9 +768,7 @@ def fetch_tpex_margin(session: requests.Session) -> tuple[pd.DataFrame, dt.date 
                  MarginPurchaseBalance, ShortSale, ShortCovering, StockRedemption,
                  ShortSaleBalance
     """
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TPEX_MARGIN_URL, timeout=30, verify=False)
-    response.raise_for_status()
+    response = _http_get(session, TPEX_MARGIN_URL)
     payload = response.json()
 
     if not isinstance(payload, list):
@@ -868,9 +863,7 @@ def fetch_tpex_disposition(
         "endDate": end.strftime("%Y/%m/%d"),
         "response": "json",
     }
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(TPEX_DISPOSAL_V2_URL, params=params, timeout=30, verify=False)
-    response.raise_for_status()
+    response = _http_get(session, TPEX_DISPOSAL_V2_URL, params)
     payload = response.json()
 
     if payload.get("stat") not in {None, "ok", "OK"}:
@@ -1130,7 +1123,7 @@ def fetch_twse_taiex_ohlc(
     """
     first = month_date.replace(day=1)
     params = {"response": "json", "date": first.strftime("%Y%m%d")}
-    resp = _twse_get(session, TWSE_TAIEX_OHLC_URL, params)
+    resp = _http_get(session, TWSE_TAIEX_OHLC_URL, params)
     payload = resp.json()
     if payload.get("stat") != "OK":
         raise DataUnavailableError(payload.get("stat") or "MI_5MINS_HIST 回傳異常")
@@ -1158,7 +1151,7 @@ def fetch_twse_market_volume(
     """
     first = month_date.replace(day=1)
     params = {"response": "json", "date": first.strftime("%Y%m%d")}
-    resp = _twse_get(session, TWSE_MARKET_VOLUME_URL, params)
+    resp = _http_get(session, TWSE_MARKET_VOLUME_URL, params)
     payload = resp.json()
     if payload.get("stat") != "OK":
         raise DataUnavailableError(payload.get("stat") or "FMTQIK 回傳異常")
@@ -1181,7 +1174,7 @@ def fetch_twse_foreign_net(
         None if data unavailable.
     """
     params = {"response": "json", "dayDate": date.strftime("%Y%m%d"), "type": "day"}
-    resp = _twse_get(session, TWSE_FOREIGN_NET_URL, params)
+    resp = _http_get(session, TWSE_FOREIGN_NET_URL, params)
     payload = resp.json()
     if payload.get("stat") != "OK" or not payload.get("data"):
         return None
@@ -1233,7 +1226,7 @@ def fetch_twse_market_margin(
         {margin_balance, margin_balance_change, prev_margin_balance} (元) or None.
     """
     params = {"response": "json", "date": date.strftime("%Y%m%d"), "selectType": "MS"}
-    resp = _twse_get(session, TWSE_MARKET_MARGIN_URL, params)
+    resp = _http_get(session, TWSE_MARKET_MARGIN_URL, params)
     return _parse_market_margin_payload(resp.json())
 
 
