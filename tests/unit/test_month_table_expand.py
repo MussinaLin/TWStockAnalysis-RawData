@@ -12,7 +12,7 @@ import datetime as dt
 
 import pandas as pd
 
-from tw_stock_rawdata.sources import expand_tpex_stock_day, expand_twse_stock_day
+from tw_stock_rawdata.prepare import expand_tpex_stock_day, expand_twse_stock_day
 
 
 def _twse_df() -> pd.DataFrame:

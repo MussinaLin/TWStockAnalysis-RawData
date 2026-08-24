@@ -35,6 +35,8 @@ from .db_utils import (
     upsert_stock_shares,
 )
 from .prepare import (
+    expand_tpex_stock_day,
+    expand_twse_stock_day,
     prepare_disposition,
     prepare_moneydj_holding_pct,
     prepare_moneydj_insti,
@@ -56,8 +58,6 @@ from .price_limit import calc_limits
 from .sources import (
     DataUnavailableError,
     build_session,
-    expand_tpex_stock_day,
-    expand_twse_stock_day,
     fetch_moneydj_holding_pct,
     fetch_moneydj_margin,
     fetch_tdcc_distribution,
