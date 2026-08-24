@@ -7,62 +7,19 @@
 from __future__ import annotations
 
 import datetime as dt
-from contextlib import contextmanager
-from typing import Any
 
 import pandas as pd
 import pytest
 
+from tests.conftest import FakeCursor, install_fake_pool
 from tw_stock_rawdata import db_utils
 
 
-class _FakeCursor:
-    def __init__(self) -> None:
-        self.executed_many: list[tuple[str, Any]] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def executemany(self, sql: str, params: Any) -> None:
-        self.executed_many.append((sql, params))
-
-
-class _FakeConn:
-    def __init__(self, cur: _FakeCursor):
-        self._cur = cur
-        self.committed = False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def cursor(self):
-        return self._cur
-
-    def commit(self) -> None:
-        self.committed = True
-
-
-class _FakePool:
-    def __init__(self, cur: _FakeCursor):
-        self._conn = _FakeConn(cur)
-
-    @contextmanager
-    def connection(self):
-        yield self._conn
-
-
-def _install(monkeypatch, cur: _FakeCursor) -> _FakePool:
-    pool = _FakePool(cur)
-    monkeypatch.setattr(db_utils, "get_pool", lambda _url: pool)
-    # ensure_partition 觸 DB，unit test 以 no-op 取代
+def _install(monkeypatch, cur: FakeCursor):
+    """共用假連線池，外加把 ensure_partition 停掉——它會真的觸 DB。"""
+    conn = install_fake_pool(monkeypatch, db_utils, cur)
     monkeypatch.setattr(db_utils, "ensure_partition", lambda conn, trade_date: None)
-    return pool
+    return conn
 
 
 def _sample_df() -> pd.DataFrame:
@@ -98,8 +55,8 @@ def _sample_df() -> pd.DataFrame:
 
 def test_upsert_uses_coalesce_for_every_update_column(monkeypatch):
     """每個 update 欄位都必須是 COALESCE(EXCLUDED.col, stock_daily_raw.col)。"""
-    cur = _FakeCursor()
-    pool = _install(monkeypatch, cur)
+    cur = FakeCursor()
+    conn = _install(monkeypatch, cur)
 
     db_utils.upsert_daily_raw("postgres://x", dt.date(2026, 5, 13), _sample_df())
 
@@ -109,12 +66,12 @@ def test_upsert_uses_coalesce_for_every_update_column(monkeypatch):
     update_cols = [c for c in db_utils._RAW_COLUMNS if c not in ("symbol", "trade_date")]
     for col in update_cols:
         assert f"{col} = COALESCE(EXCLUDED.{col}, stock_daily_raw.{col})" in sql
-    assert pool._conn.committed
+    assert conn.committed
 
 
 def test_upsert_has_no_bare_excluded_overwrite(monkeypatch):
     """回歸鎖：不得殘留裸 'col = EXCLUDED.col'（會把 NULL 蓋掉好資料）。"""
-    cur = _FakeCursor()
+    cur = FakeCursor()
     _install(monkeypatch, cur)
 
     db_utils.upsert_daily_raw("postgres://x", dt.date(2026, 5, 13), _sample_df())
@@ -130,7 +87,7 @@ def test_upsert_has_no_bare_excluded_overwrite(monkeypatch):
 
 def test_upsert_sql_structure_and_none_passthrough(monkeypatch):
     """SQL 結構正確，且含 None 的 row 仍照常進 executemany（NULL 由 DB 端 COALESCE 保護）。"""
-    cur = _FakeCursor()
+    cur = FakeCursor()
     _install(monkeypatch, cur)
 
     trade_date = dt.date(2026, 5, 13)
@@ -152,24 +109,24 @@ def test_upsert_sql_structure_and_none_passthrough(monkeypatch):
 
 
 def test_upsert_empty_df_skips_db(monkeypatch):
-    cur = _FakeCursor()
-    pool = _install(monkeypatch, cur)
+    cur = FakeCursor()
+    conn = _install(monkeypatch, cur)
 
     db_utils.upsert_daily_raw("postgres://x", dt.date(2026, 5, 13), pd.DataFrame())
 
     assert cur.executed_many == []
-    assert not pool._conn.committed
+    assert not conn.committed
 
 
 def test_upsert_all_blank_symbols_skips_db(monkeypatch):
-    cur = _FakeCursor()
-    pool = _install(monkeypatch, cur)
+    cur = FakeCursor()
+    conn = _install(monkeypatch, cur)
 
     df = pd.DataFrame([{"symbol": "", "close": 100.0}])
     db_utils.upsert_daily_raw("postgres://x", dt.date(2026, 5, 13), df)
 
     assert cur.executed_many == []
-    assert not pool._conn.committed
+    assert not conn.committed
 
 
 def test_raw_columns_include_price_limits() -> None:

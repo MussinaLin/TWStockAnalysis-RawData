@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 import requests
 
+from tests.conftest import FakeCursor, install_fake_pool
 from tw_stock_rawdata import db_utils, run
 from tw_stock_rawdata.prepare import _cn_to_int, prepare_disposition
 from tw_stock_rawdata.sources import DataUnavailableError
@@ -502,59 +502,14 @@ def test_build_daily_rows_without_disposition_writes_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeCursor:
-    def __init__(self, rowcounts: list[int]):
-        self._rowcounts = list(rowcounts)
-        self.rowcount = 0
-        self.executed: list[tuple[str, object]] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def execute(self, sql: str, params: object = None) -> None:
-        self.executed.append((sql, params))
-        if self._rowcounts:
-            self.rowcount = self._rowcounts.pop(0)
-
-
-class _FakeConn:
-    def __init__(self, cursor: _FakeCursor):
-        self._cursor = cursor
-        self.committed = False
-
-    def cursor(self):
-        return self._cursor
-
-    def commit(self) -> None:
-        self.committed = True
-
-
-class _FakePool:
-    def __init__(self, conn: _FakeConn):
-        self._conn = conn
-
-    @contextmanager
-    def connection(self):
-        yield self._conn
-
-
-def _patch_pool(monkeypatch, cursor: _FakeCursor) -> _FakeConn:
-    conn = _FakeConn(cursor)
-    monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
-    return conn
-
-
 class TestUpdateDispositionBatch:
     def test_empty_updates_returns_zero(self) -> None:
         assert db_utils.update_disposition_batch("postgres://x", []) == 0
 
     def test_uses_update_not_insert(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """必須是 UPDATE：走 upsert 會 INSERT 出其餘欄位全 NULL 的半套 row。"""
-        cursor = _FakeCursor([1])
-        _patch_pool(monkeypatch, cursor)
+        cursor = FakeCursor(rowcounts=[1])
+        install_fake_pool(monkeypatch, db_utils, cursor)
 
         db_utils.update_disposition_batch("postgres://x", [("2330", DATE, True, 20)])
 
@@ -567,8 +522,8 @@ class TestUpdateDispositionBatch:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """N 筆更新只能發一次 execute（逐列 execute 是一列一次網路往返）。"""
-        cursor = _FakeCursor([500])
-        _patch_pool(monkeypatch, cursor)
+        cursor = FakeCursor(rowcounts=[500])
+        install_fake_pool(monkeypatch, db_utils, cursor)
 
         updates = [(f"{i:04d}", DATE, False, 0) for i in range(500)]
         db_utils.update_disposition_batch("postgres://x", updates)
@@ -579,8 +534,8 @@ class TestUpdateDispositionBatch:
     def test_chunks_to_stay_under_param_limit(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cursor = _FakeCursor([1000, 500])
-        _patch_pool(monkeypatch, cursor)
+        cursor = FakeCursor(rowcounts=[1000, 500])
+        install_fake_pool(monkeypatch, db_utils, cursor)
 
         n_rows = db_utils._BATCH_UPDATE_CHUNK + 500
         updates = [(f"{i:05d}", DATE, False, 0) for i in range(n_rows)]
@@ -592,8 +547,8 @@ class TestUpdateDispositionBatch:
 
     def test_returns_total_rowcount(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """不存在的 (symbol, trade_date) 不計入 —— 由 UPDATE 的 rowcount 反映。"""
-        cursor = _FakeCursor([2])
-        conn = _patch_pool(monkeypatch, cursor)
+        cursor = FakeCursor(rowcounts=[2])
+        conn = install_fake_pool(monkeypatch, db_utils, cursor)
 
         n = db_utils.update_disposition_batch(
             "postgres://x", [("2330", DATE, True, 5), ("9999", DATE, False, 0)]

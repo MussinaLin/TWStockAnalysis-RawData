@@ -3,56 +3,16 @@
 from __future__ import annotations
 
 import datetime as dt
-from contextlib import contextmanager
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
 
 import pandas as pd
 import pytest
 
+from tests.conftest import FakeCursor, install_fake_pool
 from tw_stock_rawdata import db_utils, run
 
 DATE = dt.date(2026, 8, 12)
-
-
-class _FakeCursor:
-    def __init__(self, rowcounts: list[int]):
-        self._rowcounts = list(rowcounts)
-        self.rowcount = 0
-        self.executed: list[tuple[str, Any]] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        self.executed.append((sql, params))
-        if self._rowcounts:
-            self.rowcount = self._rowcounts.pop(0)
-
-
-class _FakeConn:
-    def __init__(self, cursor: _FakeCursor):
-        self._cursor = cursor
-        self.committed = False
-
-    def cursor(self):
-        return self._cursor
-
-    def commit(self) -> None:
-        self.committed = True
-
-
-class _FakePool:
-    def __init__(self, conn: _FakeConn):
-        self._conn = conn
-
-    @contextmanager
-    def connection(self):
-        yield self._conn
 
 
 class TestUpdatePriceLimitsBatch:
@@ -61,9 +21,8 @@ class TestUpdatePriceLimitsBatch:
 
     def test_uses_update_not_insert(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """必須是 UPDATE：走 upsert 會 INSERT 出半套 row。"""
-        cursor = _FakeCursor([1])
-        conn = _FakeConn(cursor)
-        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+        cursor = FakeCursor(rowcounts=[1])
+        conn = install_fake_pool(monkeypatch, db_utils, cursor)
 
         db_utils.update_price_limits_batch(
             "postgres://x", [("2330", DATE, Decimal("2655"), Decimal("2175"))]
@@ -82,9 +41,8 @@ class TestUpdatePriceLimitsBatch:
         逐列 execute 是一列一次網路往返：實測對遠端 DB 是 96.7ms/次，
         單日 6763 筆要 11 分鐘、回補一年 44.5 小時，等於這個指令沒得用。
         """
-        cursor = _FakeCursor([500])
-        conn = _FakeConn(cursor)
-        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+        cursor = FakeCursor(rowcounts=[500])
+        conn = install_fake_pool(monkeypatch, db_utils, cursor)
 
         updates = [
             (f"{i:04d}", DATE, Decimal("11"), Decimal("9")) for i in range(500)
@@ -99,9 +57,8 @@ class TestUpdatePriceLimitsBatch:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """超過 chunk 大小要分批：PostgreSQL 單一語句參數上限 65535。"""
-        cursor = _FakeCursor([1000, 500])
-        conn = _FakeConn(cursor)
-        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+        cursor = FakeCursor(rowcounts=[1000, 500])
+        conn = install_fake_pool(monkeypatch, db_utils, cursor)
 
         n_rows = db_utils._BATCH_UPDATE_CHUNK + 500
         updates = [
@@ -115,9 +72,8 @@ class TestUpdatePriceLimitsBatch:
 
     def test_returns_total_rowcount(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """不存在的 (symbol, trade_date) 不計入 —— 由 UPDATE 的 rowcount 反映。"""
-        cursor = _FakeCursor([2])
-        conn = _FakeConn(cursor)
-        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakePool(conn))
+        cursor = FakeCursor(rowcounts=[2])
+        conn = install_fake_pool(monkeypatch, db_utils, cursor)
 
         n = db_utils.update_price_limits_batch(
             "postgres://x",
@@ -259,43 +215,9 @@ def test_backfill_limits_is_not_daily_mode() -> None:
     assert run._is_daily_mode(args) is False
 
 
-class _FakeResult:
-    def __init__(self, rows: list[Any]):
-        self._rows = rows
-
-    def fetchall(self):
-        return self._rows
-
-
-class _FakeQueryConn:
-    def __init__(self, rows: list[Any]):
-        self._rows = rows
-        self.executed: list[tuple[str, Any]] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def execute(self, sql: str, params: Any = None):
-        self.executed.append((sql, params))
-        return _FakeResult(self._rows)
-
-
-class _FakeQueryPool:
-    def __init__(self, conn: _FakeQueryConn):
-        self._conn = conn
-
-    @contextmanager
-    def connection(self):
-        yield self._conn
-
-
 class TestLoadSymbolsForDate:
     def test_returns_symbol_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        conn = _FakeQueryConn([("2330",), ("3605",)])
-        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakeQueryPool(conn))
+        conn = install_fake_pool(monkeypatch, db_utils, fetchall_rows=[("2330",), ("3605",)])
 
         assert db_utils.load_symbols_for_date("postgres://x", DATE) == {"2330", "3605"}
         sql, params = conn.executed[0]
@@ -303,8 +225,7 @@ class TestLoadSymbolsForDate:
         assert params == (DATE,)
 
     def test_empty_when_date_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        conn = _FakeQueryConn([])
-        monkeypatch.setattr(db_utils, "get_pool", lambda url: _FakeQueryPool(conn))
+        conn = install_fake_pool(monkeypatch, db_utils, fetchall_rows=[])
 
         assert db_utils.load_symbols_for_date("postgres://x", DATE) == set()
 
