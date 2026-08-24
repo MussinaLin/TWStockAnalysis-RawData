@@ -12,13 +12,11 @@ from tw_stock_rawdata.sources import (
     _clean_int,
     _clean_number,
     _date_to_roc,
-    _extract_first_date,
     _extract_twse_table,
     _parse_date_any,
     _parse_market_margin_payload,
     _parse_roc_date,
     _parse_twse_margin_all_payload,
-    _read_tpex_csv,
     _roc_to_date,
     fetch_twse_margin,
     fetch_twse_mi_index,
@@ -80,28 +78,6 @@ class TestParseDateAny:
 
     def test_single_digit_month_day(self):
         assert _parse_date_any("2025/3/8") == dt.date(2025, 3, 8)
-
-
-# ---------------------------------------------------------------------------
-# _extract_first_date
-# ---------------------------------------------------------------------------
-
-class TestExtractFirstDate:
-    def test_iso_date_in_text(self):
-        assert _extract_first_date("資料日期：2025-03-18 台灣") == dt.date(2025, 3, 18)
-
-    def test_roc_date_in_text(self):
-        assert _extract_first_date("民國 114/03/18 收盤行情") == dt.date(2025, 3, 18)
-
-    def test_compact_date(self):
-        assert _extract_first_date("日期20250318") == dt.date(2025, 3, 18)
-
-    def test_no_date(self):
-        assert _extract_first_date("沒有日期資訊") is None
-
-    def test_multiple_dates_returns_first(self):
-        result = _extract_first_date("從 2025-01-01 到 2025-03-18")
-        assert result == dt.date(2025, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -230,34 +206,6 @@ class TestExtractTwseTable:
     def test_empty_payload_raises(self):
         with pytest.raises(DataUnavailableError):
             _extract_twse_table({})
-
-
-# ---------------------------------------------------------------------------
-# _read_tpex_csv
-# ---------------------------------------------------------------------------
-
-class TestReadTpexCsv:
-    def test_basic_csv(self):
-        csv_text = (
-            "日期: 114/03/18\n"
-            "代號,名稱,收盤,漲跌,成交量\n"
-            "6488,環球晶,450,+5,1000\n"
-        )
-        df = _read_tpex_csv(csv_text)
-        assert len(df) >= 1
-        assert "代號" in df.columns
-
-    def test_empty_raises(self):
-        with pytest.raises(DataUnavailableError):
-            _read_tpex_csv("")
-
-    def test_html_response_raises(self):
-        with pytest.raises(DataUnavailableError):
-            _read_tpex_csv("<html><body>Error</body></html>")
-
-    def test_no_data_raises(self):
-        with pytest.raises(DataUnavailableError):
-            _read_tpex_csv("查無資料")
 
 
 # ---------------------------------------------------------------------------

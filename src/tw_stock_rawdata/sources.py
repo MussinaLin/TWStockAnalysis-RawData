@@ -225,21 +225,6 @@ def _parse_date_any(value: str) -> dt.date | None:
     return None
 
 
-def _extract_first_date(text: str) -> dt.date | None:
-    """Extract the first recognizable date from free-form text (title, subtitle, etc.)."""
-    patterns = [
-        r"(?<!\d)(\d{4}[/-]\d{1,2}[/-]\d{1,2})(?!\d)",
-        r"(?<!\d)(\d{2,3}[/-]\d{1,2}[/-]\d{1,2})(?!\d)",
-        r"(?<!\d)(\d{8})(?!\d)",
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, text):
-            date_value = _parse_date_any(match.group(1))
-            if date_value:
-                return date_value
-    return None
-
-
 def _clean_number(value: Any) -> float | None:
     """Convert value to float, handling commas, '--', NaN. Returns None on failure."""
     if value is None:
@@ -313,40 +298,6 @@ def _extract_twse_table(payload: dict[str, Any]) -> pd.DataFrame:
             return pd.DataFrame(data, columns=fields)
 
     raise DataUnavailableError("TWSE MI_INDEX 無法找到行情表格。")
-
-
-def _read_tpex_csv(text: str) -> pd.DataFrame:
-    """Parse TPEX CSV response text into DataFrame.
-
-    Handles encoding quirks, skips header lines, and auto-detects the column header
-    row (containing 代號/名稱). Raises DataUnavailableError on parse failure.
-    """
-    lines = [line for line in text.splitlines() if line.strip()]
-    if not lines:
-        raise DataUnavailableError("TPEX 回傳內容為空。")
-
-    joined = "\n".join(lines)
-    lower = joined.lower()
-    if "<html" in lower or "<!doctype" in lower:
-        raise DataUnavailableError("TPEX 回傳非 CSV（可能為網頁內容）。")
-    if "查無資料" in joined or "沒有資料" in joined:
-        raise DataUnavailableError("TPEX 查無資料。")
-
-    header_idx = None
-    for idx, line in enumerate(lines):
-        if "," not in line:
-            continue
-        if line.lstrip().startswith(("註", "說明")):
-            continue
-        if ("代號" in line and "名稱" in line) or ("證券代號" in line and "收盤" in line):
-            header_idx = idx
-            break
-
-    if header_idx is None:
-        raise DataUnavailableError("TPEX CSV 解析失敗，未找到表頭。")
-
-    csv_text = "\n".join(lines[header_idx:])
-    return pd.read_csv(io.StringIO(csv_text))
 
 
 @_retry_on_transient(
