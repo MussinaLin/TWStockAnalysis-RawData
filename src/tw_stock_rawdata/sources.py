@@ -305,19 +305,22 @@ def _http_get(
     url: str,
     params: dict | None = None,
 ) -> requests.Response:
-    """送出交易所端點的 GET 請求並確認 HTTP 狀態。TWSE 與 TPEX 兩群共用。
+    """送出上游端點的 GET 請求並確認 HTTP 狀態。TWSE / TPEX / MoneyDJ 共用。
 
     抽出的是各 fetcher 完全一致的那三行（停用自簽憑證警告 → GET(timeout=30,
     verify=False) → raise_for_status），**不含**回應的解析：各端點在這之後差異
     很大（stat 判準有嚴格與寬鬆兩種、有的先看 response.text 是否空白、有的要
-    改編碼、有的回 list 而非 dict、有的要驗月份回聲），把那些一併吞進來只會讓
-    真正的差異藏進參數裡。
+    改編碼、有的回 list 而非 dict、有的要驗月份回聲、MoneyDJ 走 read_html），
+    把那些一併吞進來只會讓真正的差異藏進參數裡。
 
-    verify=False 是既有行為：兩家交易所的憑證鏈在部分環境都驗不過。集中在此
-    之後，日後要改回驗證只需動一個地方。
+    verify=False 是既有行為：這幾家上游的憑證鏈在部分環境都驗不過。集中在此
+    之後，日後要改回驗證只需動一個地方——但也代表改動會同時影響所有上游，
+    要分開處理就得再拆。
 
-    不涵蓋 fetch_twse_disposition（該端點沒有 verify=False，納入會改變其 TLS
-    行為）、MoneyDJ 與 TDCC 兩群（見 docs/refactor-plan.md X1）。
+    兩處刻意不涵蓋（見 docs/refactor-plan.md X1）：
+    - fetch_twse_disposition：該端點沒有 verify=False，納入會改變其 TLS 行為。
+    - TDCC 兩個 fetcher：其中 fetch_tdcc_distribution 是 POST，只遷移另一個
+      會讓那一對讀起來不對稱，且兩者覆蓋率僅 6% / 4%。
 
     raise_for_status 的例外原樣往外拋，由 _retry_on_transient 判斷是否重試。
     """
@@ -914,9 +917,7 @@ def fetch_moneydj_margin(
 
     params = {"a": symbol, "c": start_str, "d": end_str}
 
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(MONEYDJ_MARGIN_URL, params=params, timeout=30, verify=False)
-    response.raise_for_status()
+    response = _http_get(session, MONEYDJ_MARGIN_URL, params)
 
     # Parse HTML tables。
     # 不在此攔截 read_html 的 ValueError：讓它往上拋給 _retry_on_transient 重試
@@ -1045,9 +1046,7 @@ def fetch_moneydj_holding_pct(
 
     params = {"a": symbol, "c": start_str, "d": end_str}
 
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = session.get(MONEYDJ_HOLDING_URL, params=params, timeout=30, verify=False)
-    response.raise_for_status()
+    response = _http_get(session, MONEYDJ_HOLDING_URL, params)
 
     try:
         tables = pd.read_html(io.StringIO(response.text))
