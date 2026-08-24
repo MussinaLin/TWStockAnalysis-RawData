@@ -57,31 +57,6 @@ def _safe(val):
 # ---------------------------------------------------------------------------
 
 
-def upsert_stocks(
-    database_url: str,
-    enabled_symbols: list[str],
-) -> None:
-    """Enable only the given symbols in stocks table.
-
-    1. Set enabled=false for all stocks.
-    2. Set enabled=true for symbols in enabled_symbols.
-    """
-    pool = get_pool(database_url)
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE stocks SET enabled = FALSE")
-            if enabled_symbols:
-                cur.executemany(
-                    """
-                    INSERT INTO stocks (symbol, name, enabled)
-                    VALUES (%s, '', TRUE)
-                    ON CONFLICT (symbol) DO UPDATE SET enabled = TRUE
-                    """,
-                    [(s,) for s in enabled_symbols],
-                )
-        conn.commit()
-
-
 def upsert_stock_shares(
     database_url: str,
     df: pd.DataFrame,
