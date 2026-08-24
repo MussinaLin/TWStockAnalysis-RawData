@@ -121,8 +121,6 @@ def _fetch_issued_shares_from_api(session: requests.Session) -> pd.DataFrame:
 
     Returns DataFrame with columns: symbol, name, issued_shares
     """
-    import time
-
     frames: list[pd.DataFrame] = []
 
     # Fetch TWSE listed companies
@@ -189,8 +187,6 @@ def _update_shares_command(
     config: AppConfig,
 ) -> None:
     """Command to update issued shares to DB."""
-    import time
-
     t_start = time.monotonic()
     print("正在從 API 取得發行股數...")
     df = _fetch_issued_shares_from_api(session)
@@ -253,8 +249,6 @@ def _fetch_tdcc_with_retry(
         (distribution_or_None, token, last_exc)。成功時 distribution 非 None、
         token 為最新可用 token；全部嘗試失敗時 distribution 為 None。
     """
-    import time
-
     last_exc: Exception | None = None
     for attempt in range(_TDCC_MAX_ATTEMPTS):
         try:
