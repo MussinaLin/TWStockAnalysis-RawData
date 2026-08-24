@@ -450,7 +450,7 @@ EXCLUDED 覆寫（那是本次要更新的主資料）。另涵蓋空 rows／全
 CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。以下三項**已達門檻**，
 但覆蓋率不足以安全抽取，需等第 4 節相關項目完成。
 
-### [ ] X1 — HTTP 呼叫前置樣板（23 次）
+### [~] X1 — HTTP 呼叫前置樣板（TWSE 群已完成，其餘待辦）
 
 - **位置**：`sources.py` 全檔，`urllib3.disable_warnings(...)` 23 次、`verify=False` 23 次、
   `raise_for_status()` 24 次
@@ -460,6 +460,41 @@ CLAUDE.md：`不新增抽象層，除非同一段邏輯已重複三次以上`。
 - **收益**：`sources.py` 預估減少 40–60 行；「停用 TLS 驗證」這個決定從 23 份收斂成 1 份
 - **前置**：建議排在最後。單一 commit 涵蓋 24 個 fetcher 違反「一次一種 transformation」的精神，
   可考慮分批（TWSE 一批、TPEX 一批、MoneyDJ/TDCC 一批）
+
+**進度**（2026-08-24）：**TWSE 群已完成**，TPEX / MoneyDJ / TDCC 三群待辦。
+
+前置：新增 `tests/unit/test_twse_request_shape.py` 24 個案例，只涵蓋「請求怎麼送、
+回應怎麼進入解析」這一層——每個 fetcher 的目標 URL、完整 params、以及
+`raise_for_status` 的例外不可被吞掉。
+
+抽出 `_twse_get(session, url, params)`，涵蓋十個 fetcher。**邊界刻意停在
+「送出請求並確認 HTTP 狀態」，不含回應解析**——這是 X2 檢討得到的教訓：
+各端點在 `raise_for_status` 之後差異很大（stat 判準嚴格 / 寬鬆兩種、
+`fetch_twse_stock_day` 先看 `response.text` 是否空白、`fetch_twse_company_basic`
+要改編碼走 `.text`、`fetch_twse_stock_day_all` 回 list 而非 dict），
+一併吞進共用函式只會讓真正的差異藏進參數裡。
+
+`fetch_twse_disposition` 刻意不納入：它是這群裡唯一沒有 `verify=False` 的，
+納入會改變該端點的 TLS 行為。
+
+收斂成果（`sources.py`）：
+
+| 樣板 | X2 完成時 | 現在 |
+|---|---:|---:|
+| `urllib3.disable_warnings` | 21 | **10** |
+| `verify=False` | 21 | **12** |
+| `raise_for_status` | 22 | **13** |
+
+`verify=False` 這個決定從十份收斂成一份，日後要改回驗證憑證只需動 `_twse_get`。
+
+驗證：以舊實作對 120 組輸入（八個 fetcher × 三種連線結果 × 五種 payload）
+比對回傳值、例外型別與訊息、以及實際送出的 (url, params)，差異 0。
+
+**剩餘三群的性質**（尚未評估是否值得比照辦理）：
+- TPEX：`fetch_tpex_stock_day` / `fetch_tpex_company_basic` / `fetch_tpex_margin` /
+  `fetch_tpex_disposition`，另有 `_fetch_tpex_v2` 已自成一群。
+- MoneyDJ：兩個 fetcher，走 `read_html`、PER_SYMBOL retry profile。
+- TDCC：兩個 fetcher，需要 token 鏈接，其中一個是 POST 而非 GET。
 
 ### [x] X2 — TPEX V2 fetcher 三重複
 
