@@ -437,11 +437,31 @@ COALESCE（不可把既有股名／歷史散戶比例蓋成 NULL），`major_rat
 EXCLUDED 覆寫（那是本次要更新的主資料）。另涵蓋空 rows／全空白 symbol 完全
 不觸 DB、空白 symbol 過濾、空白股名轉 None（才能讓 COALESCE 生效）。
 
-### [ ] T9 — `_main_inner`
+### [x] T9 — `_main_inner`
 
 - **位置**：`run.py:2406-2613`（212 行）
 - **CC / 覆蓋率**：32 (E) / 41%
 - **爆炸半徑**：低（src 1 處）但它是 CLI 總分派，改壞會影響所有子命令
+
+**實際結果**（2026-08-24）：新增 `tests/unit/test_main_inner_dispatch.py` 26 個案例，
+覆蓋率 **41% → 100%**。
+
+只測「分派」與「前置閘門」，不重測各子命令自身的邏輯（那些已有專屬測試檔）：
+
+- **子命令路由**：四個旗標各自走對分支，且**走完就停**——不可再跑到後面的模式。
+  另釘住優先序（`--update-shares` > `--dahu` > `--backfill-limits`），
+  同時給多個旗標時的行為是明確的而非碰運氣。
+- **休市閘門**：只擋純 daily 模式；`--date` / `--backfill-*` / `--update-shares` /
+  `--dahu` 完全不查 `config.is_trading_day`。讀取失敗時 **fail-open**——
+  排程不可因 DB 抖動整天不跑。
+- **`--backfill-stocks` 的守衛**：缺 start/end 中止、代號清單全空白中止、
+  `write_market_daily=False`（CLAUDE.md 不變量：逐檔回補不動共用大盤表）、
+  起訖顛倒要正規化（否則 `_month_starts` 回空 list，整段靜默 no-op 卻照樣印抬頭）。
+- **一般回補與單日**：`--force` 對應 `skip_existing=False`、只給
+  `--backfill-start` 或只給 `--backfill-end` 時另一端取 `target_date`、
+  一天都沒寫入時不做 D-1 margin 修正。
+
+`run.py` 全檔覆蓋率 53% → 74%。
 
 ---
 
