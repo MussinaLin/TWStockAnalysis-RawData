@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from tw_stock_rawdata.prepare import prepare_moneydj_insti
+from tests.conftest import FakeSession
 from tw_stock_rawdata.sources import DataUnavailableError, fetch_moneydj_holding_pct
 
 # 真實擷取的 zcl 頁面（2330、2025-07-01 ~ 2025-07-31，cp950/big5 編碼）。
@@ -76,29 +77,13 @@ def test_prepare_insti_missing_columns_yields_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeResponse:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-    def raise_for_status(self) -> None:
-        pass
-
-
-class _FakeSession:
-    def __init__(self, text: str) -> None:
-        self._text = text
-
-    def get(self, url, params=None, timeout=None, verify=None):  # noqa: ANN001
-        return _FakeResponse(self._text)
-
-
 def _fixture_html() -> str:
     return _FIXTURE.read_bytes().decode("cp950")
 
 
 def _fetch(html: str) -> pd.DataFrame:
     return fetch_moneydj_holding_pct(
-        _FakeSession(html), "2330", dt.date(2025, 7, 1), dt.date(2025, 7, 31)
+        FakeSession(text=html), "2330", dt.date(2025, 7, 1), dt.date(2025, 7, 31)
     )
 
 

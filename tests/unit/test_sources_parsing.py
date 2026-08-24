@@ -6,6 +6,7 @@ import datetime as dt
 
 import pytest
 
+from tests.conftest import FakeSession
 from tw_stock_rawdata.prepare import prepare_twse_margin
 from tw_stock_rawdata.sources import (
     DataUnavailableError,
@@ -364,30 +365,9 @@ class TestParseTwseMarginAllPayload:
             _parse_twse_margin_all_payload(payload)
 
 
-class _FakeMarginResponse:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def raise_for_status(self):
-        pass
-
-    def json(self) -> dict:
-        return self._payload
-
-
-class _FakeMarginSession:
-    def __init__(self, payload: dict):
-        self._payload = payload
-        self.calls: list[tuple[str, dict]] = []
-
-    def get(self, url, params=None, timeout=None, verify=None):
-        self.calls.append((url, params or {}))
-        return _FakeMarginResponse(self._payload)
-
-
 class TestFetchTwseMargin:
     def test_requests_dated_endpoint_and_returns_payload_date(self):
-        session = _FakeMarginSession(_make_margin_all_payload())
+        session = FakeSession(payload=_make_margin_all_payload())
         df, data_date = fetch_twse_margin(session, dt.date(2026, 7, 2))
         assert data_date == dt.date(2026, 7, 2)
         assert len(df) == 1
@@ -399,7 +379,7 @@ class TestFetchTwseMargin:
 
     def test_date_mismatch_is_returned_for_caller_to_reject(self):
         """payload date != 請求 date 時原樣回傳，由呼叫端比對後拒用。"""
-        session = _FakeMarginSession(_make_margin_all_payload(date="20260701"))
+        session = FakeSession(payload=_make_margin_all_payload(date="20260701"))
         _, data_date = fetch_twse_margin(session, dt.date(2026, 7, 2))
         assert data_date == dt.date(2026, 7, 1)
         assert data_date != dt.date(2026, 7, 2)
@@ -412,25 +392,6 @@ class TestFetchTwseMargin:
 # 一律回 dict 且一律帶 stat。因此本端點與其他 TWSE 端點一致採嚴格判準：
 # 缺 stat 視為異常，不再當成 OK 放行。
 # ---------------------------------------------------------------------------
-
-
-class _FakeMiIndexResponse:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self._payload
-
-
-class _FakeMiIndexSession:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def get(self, url, params=None, timeout=None, verify=None):
-        return _FakeMiIndexResponse(self._payload)
 
 
 def _make_mi_index_payload(**overrides) -> dict:
@@ -450,7 +411,7 @@ def _make_mi_index_payload(**overrides) -> dict:
 
 class TestFetchTwseMiIndexStat:
     def test_stat_ok_returns_table_and_date(self):
-        session = _FakeMiIndexSession(_make_mi_index_payload())
+        session = FakeSession(payload=_make_mi_index_payload())
         df, data_date = fetch_twse_mi_index(session, dt.date(2026, 8, 21))
         assert data_date == dt.date(2026, 8, 21)
         assert len(df) == 1
@@ -459,7 +420,7 @@ class TestFetchTwseMiIndexStat:
     def test_no_data_stat_raises_with_original_message(self):
         """休市日與限流回應共用這個字串（見 CLAUDE.md），必須被拒絕。"""
         payload = {"stat": "很抱歉，沒有符合條件的資料!", "type": "ALLBUT0999"}
-        session = _FakeMiIndexSession(payload)
+        session = FakeSession(payload=payload)
         with pytest.raises(DataUnavailableError, match="沒有符合條件的資料"):
             fetch_twse_mi_index(session, dt.date(2026, 8, 22))
 
@@ -467,18 +428,18 @@ class TestFetchTwseMiIndexStat:
         """缺 stat 不再放行——實測 MI_INDEX 不會回傳沒有 stat 的 payload。"""
         payload = _make_mi_index_payload()
         del payload["stat"]
-        session = _FakeMiIndexSession(payload)
+        session = FakeSession(payload=payload)
         with pytest.raises(DataUnavailableError, match="回傳異常"):
             fetch_twse_mi_index(session, dt.date(2026, 8, 21))
 
     def test_lowercase_stat_raises(self):
         """MI_INDEX 是 TWSE 端點，不接受 TPEX 那邊才有的小寫 ok。"""
-        session = _FakeMiIndexSession(_make_mi_index_payload(stat="ok"))
+        session = FakeSession(payload=_make_mi_index_payload(stat="ok"))
         with pytest.raises(DataUnavailableError):
             fetch_twse_mi_index(session, dt.date(2026, 8, 21))
 
     def test_non_dict_payload_raises_data_unavailable_not_attribute_error(self):
         """型別檢查排在 payload.get() 之前：list 不可漏成 AttributeError。"""
-        session = _FakeMiIndexSession([{"stat": "OK"}])
+        session = FakeSession(payload=[{"stat": "OK"}])
         with pytest.raises(DataUnavailableError, match="回傳格式異常"):
             fetch_twse_mi_index(session, dt.date(2026, 8, 21))

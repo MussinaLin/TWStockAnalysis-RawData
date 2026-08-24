@@ -14,30 +14,8 @@ import datetime as dt
 import pytest
 
 from tw_stock_rawdata import sources
+from tests.conftest import FakeSession
 from tw_stock_rawdata.sources import DataUnavailableError, fetch_tpex_stock_day
-
-
-class _FakeResponse:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return self._payload
-
-
-class _FakeSession:
-    """記錄 GET 參數並回固定 payload。"""
-
-    def __init__(self, payload: dict):
-        self._payload = payload
-        self.calls: list[tuple[str, dict]] = []
-
-    def get(self, url, params=None, **kwargs):  # noqa: ANN001 - 測試替身
-        self.calls.append((url, dict(params or {})))
-        return _FakeResponse(self._payload)
 
 
 def _payload(echo_date: str, rows: list[list[str]] | None = None) -> dict:
@@ -67,7 +45,7 @@ def _no_sleep(monkeypatch):
 
 def test_date_param_is_gregorian_not_roc() -> None:
     """坑 1：民國格式會被端點拒絕，這裡鎖住送出去的是西元 yyyy/MM/01。"""
-    session = _FakeSession(_payload("20250701"))
+    session = FakeSession(payload=_payload("20250701"))
     fetch_tpex_stock_day(session, "6488", dt.date(2025, 7, 15))
 
     _url, params = session.calls[0]
@@ -77,7 +55,7 @@ def test_date_param_is_gregorian_not_roc() -> None:
 
 def test_response_json_param_is_not_sent() -> None:
     """坑 2：帶了 response=json 端點會回「參數輸入錯誤」。"""
-    session = _FakeSession(_payload("20250701"))
+    session = FakeSession(payload=_payload("20250701"))
     fetch_tpex_stock_day(session, "6488", dt.date(2025, 7, 15))
 
     _url, params = session.calls[0]
@@ -85,7 +63,7 @@ def test_response_json_param_is_not_sent() -> None:
 
 
 def test_returns_month_table() -> None:
-    session = _FakeSession(_payload("20250701"))
+    session = FakeSession(payload=_payload("20250701"))
     df = fetch_tpex_stock_day(session, "6488", dt.date(2025, 7, 15))
 
     assert list(df.columns)[:2] == ["日 期", "成交張數"]
@@ -94,14 +72,14 @@ def test_returns_month_table() -> None:
 
 def test_month_mismatch_raises() -> None:
     """坑 3：請求 2025/07，端點靜默回當月（2026/08）→ 必須拋錯，不可當成資料。"""
-    session = _FakeSession(_payload("20260801"))
+    session = FakeSession(payload=_payload("20260801"))
 
     with pytest.raises(DataUnavailableError, match="月份不匹配"):
         fetch_tpex_stock_day(session, "6488", dt.date(2025, 7, 15))
 
 
 def test_bad_stat_raises() -> None:
-    session = _FakeSession({"stat": "參數輸入錯誤"})
+    session = FakeSession(payload={"stat": "參數輸入錯誤"})
 
     with pytest.raises(DataUnavailableError, match="參數輸入錯誤"):
         fetch_tpex_stock_day(session, "6488", dt.date(2025, 7, 15))
@@ -109,7 +87,7 @@ def test_bad_stat_raises() -> None:
 
 def test_empty_month_raises_data_unavailable() -> None:
     """該檔該月無資料（未上市 / 停牌）→ DataUnavailableError，呼叫端據此判斷。"""
-    session = _FakeSession(_payload("20250701", rows=[]))
+    session = FakeSession(payload=_payload("20250701", rows=[]))
 
     with pytest.raises(DataUnavailableError):
         fetch_tpex_stock_day(session, "6488", dt.date(2025, 7, 15))

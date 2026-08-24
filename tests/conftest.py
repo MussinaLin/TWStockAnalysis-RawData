@@ -126,3 +126,47 @@ def fake_pool(monkeypatch):
         return install_fake_pool(monkeypatch, module, cursor, **kwargs)
 
     return _install
+
+
+class FakeResponse:
+    """HTTP 回應替身，同時支援 .text 與 .json() 兩種讀法。
+
+    各 fetcher 走的路不同（TWSE/TPEX 多用 json、MoneyDJ/TDCC 用 text），
+    這裡兩者都給，測試只需傳自己要的那個。
+    """
+
+    def __init__(self, text: str | None = None, payload: Any = None, status_error: Exception | None = None) -> None:
+        self.text = text if text is not None else ""
+        self._payload = payload
+        self._status_error = status_error
+
+    def raise_for_status(self) -> None:
+        if self._status_error is not None:
+            raise self._status_error
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class FakeSession:
+    """記錄每次 GET 的 (url, params)，回傳固定回應。
+
+    `responses` 給多個時依序取用，用完後重複最後一個——讓「同一個 fetcher
+    內連打數次」的情境也能安排不同回應。
+    """
+
+    def __init__(
+        self,
+        text: str | None = None,
+        payload: Any = None,
+        responses: list[FakeResponse] | None = None,
+    ) -> None:
+        self._responses = list(responses or [])
+        self._default = FakeResponse(text=text, payload=payload)
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, url, params=None, timeout=None, verify=None, **kwargs):
+        self.calls.append((url, dict(params or {})))
+        if self._responses:
+            return self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
+        return self._default
