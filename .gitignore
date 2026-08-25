@@ -219,3 +219,10 @@ __marimo__/
 
 # Claude Code local config
 .claude/
+
+# 錄製／重放比對工具的 tape 與輸出（見 tools/replay/README.md）
+# tape 是 100MB 量級的上游回應快取，且會過期——重錄即可，不進版控
+*.tape.json
+tools/replay/*.json
+!tools/replay/stocks.json
+!tools/replay/days.json

@@ -1,0 +1,10 @@
+[
+ {"symbol":"2330","name":"台積電","market_type":"twse"},
+ {"symbol":"2317","name":"鴻海","market_type":"twse"},
+ {"symbol":"1101","name":"台泥","market_type":"twse"},
+ {"symbol":"2603","name":"長榮","market_type":"twse"},
+ {"symbol":"6488","name":"環球晶","market_type":"tpex"},
+ {"symbol":"3105","name":"穩懋","market_type":"tpex"},
+ {"symbol":"5483","name":"中美晶","market_type":"tpex"},
+ {"symbol":"8069","name":"元太","market_type":"tpex"}
+]

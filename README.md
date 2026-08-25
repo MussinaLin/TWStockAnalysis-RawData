@@ -270,6 +270,28 @@ schema、休市檢查、發行股數與數組整批抓取；這些階段原本�
   STOCK_DAY_ALL / MI_INDEX、TPEX 整批、TWSE 與 TPEX 融資融券、外資/法人持股佔比逐檔、
   逐檔組列、寫入 `stock_daily_raw`、大盤行情。
 
+### 重構前後的資料一致性驗證
+
+`tools/replay/` 是一套錄製／重放比對工具：用真實上游回應驗證「重構前後產出是否相同」。
+單元測試餵的是合成輸入，證明不了這件事。
+
+```bash
+git worktree add --detach /tmp/base-tree <重構前的 commit>
+python tools/replay/capture.py --src /tmp/base-tree/src --mode daily --record \
+    --tape /tmp/tape.json --out /tmp/base.json
+python tools/replay/capture.py --src ./src --mode daily \
+    --tape /tmp/tape.json --out /tmp/dev.json
+python tools/replay/compare.py /tmp/base.json /tmp/dev.json base dev
+```
+
+三種模式（`daily` / `dahu` / `backfill-stocks`）分別涵蓋三條抓取路徑，要三種都跑
+才算全覆蓋。比對的是每次 `fetch_*` / `prepare_*` 的呼叫順序、參數、完整回傳值，
+外加所有 DB 寫入內容。詳見 `tools/replay/README.md`。
+
+**為什麼是錄製／重放而不是各跑一次**：直接讓兩個版本各打一次 API，請求量翻倍
+（20 天約 17,680 次），且 TWSE 限流回應與「沒資料」同字串，上游不穩會被誤判成
+程式差異。錄一次、重放兩次，網路只打 1×，重放完全離線可無限重跑。
+
 ## Docker
 
 容器以 `PYTHONUNBUFFERED=1` 執行。容器內 stdout 不是 TTY，Python 預設走 8KB 區塊緩衝，
