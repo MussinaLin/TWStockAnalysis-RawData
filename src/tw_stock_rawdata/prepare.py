@@ -797,13 +797,34 @@ def prepare_moneydj_margin(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _trust_holding_pct(insti_pct, trust_lots: int | None, insti_lots: int | None) -> float | None:
+    """由三大法人持股比例反推投信持股比例：insti_pct × 投信估計持股 ÷ 合計估計持股。
+
+    合計 ≤ 0 卻有投信持股時反推不出分母，回 None；投信為 0 時直接回 0。
+    """
+    if pd.isna(insti_pct) or trust_lots is None or insti_lots is None:
+        return None
+    if trust_lots == 0:
+        return 0.0
+    if insti_lots <= 0:
+        return None
+    return round(insti_pct * trust_lots / insti_lots, 4)
+
+
 def prepare_moneydj_holding_pct(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare MoneyDJ institutional holding percentage data.
 
     Input DataFrame from fetch_moneydj_holding_pct with columns:
-    date, foreign_holding_pct, insti_holding_pct
+    date, foreign_holding_pct, insti_holding_pct, trust_holding_lots, insti_holding_lots
 
-    Returns DataFrame with parsed dates and percentages as decimals (e.g., 0.3503).
+    Returns DataFrame with parsed dates and percentages as decimals (e.g., 0.3503):
+    foreign_holding_pct, insti_holding_pct, trust_holding_pct.
+
+    投信持股比例頁面沒有直接給，用同一天的三大法人比例反推分母（見
+    `_trust_holding_pct`），分母因此就是 MoneyDJ 當天用的股本。**不要**改用
+    stocks.issued_shares：那是目前的快照，回補歷史時遇到增資、減資、配股會算錯。
+    insti_holding_pct 只有兩位小數（±0.005 個百分點），乘上 投信 ÷ 合計（≤ 1）後
+    誤差不會更大，故四捨五入到 4 位，與外資、法人兩欄同精度（DB 皆 NUMERIC(8,4)）。
     """
     if "date" not in df.columns:
         raise DataUnavailableError("MoneyDJ 法人持股欄位解析失敗，缺少 date")
@@ -827,6 +848,20 @@ def prepare_moneydj_holding_pct(df: pd.DataFrame) -> pd.DataFrame:
             result[col] = df[col].map(_parse_pct_to_decimal)
         else:
             result[col] = None
+
+    def _lots(col: str) -> list[int | None]:
+        if col not in df.columns:
+            return [None] * len(df)
+        return [_clean_int(v) for v in df[col]]
+
+    result["trust_holding_pct"] = [
+        _trust_holding_pct(pct, trust, total)
+        for pct, trust, total in zip(
+            result["insti_holding_pct"],
+            _lots("trust_holding_lots"),
+            _lots("insti_holding_lots"),
+        )
+    ]
 
     result = result.dropna(subset=["date"])
 

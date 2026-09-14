@@ -23,7 +23,8 @@ _RAW_COLUMNS = [
     "institutional_investors_net", "margin_buy", "margin_sell",
     "margin_balance", "margin_change", "short_sell", "short_buy",
     "short_balance", "short_change", "short_margin_ratio",
-    "foreign_holding_pct", "insti_holding_pct", "limit_up", "limit_down",
+    "foreign_holding_pct", "insti_holding_pct", "trust_holding_pct",
+    "limit_up", "limit_down",
     "is_disposition", "disposition_match_minutes",
 ]
 
@@ -34,7 +35,8 @@ _RAW_DF_COLS = [
     "institutional_investors_net", "margin_buy", "margin_sell",
     "margin_balance", "margin_change", "short_sell", "short_buy",
     "short_balance", "short_change", "short_margin_ratio",
-    "foreign_holding_pct", "insti_holding_pct", "limit_up", "limit_down",
+    "foreign_holding_pct", "insti_holding_pct", "trust_holding_pct",
+    "limit_up", "limit_down",
     "is_disposition", "disposition_match_minutes",
 ]
 

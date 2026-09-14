@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tw_stock_rawdata.prepare import prepare_moneydj_insti
+from tw_stock_rawdata.prepare import prepare_moneydj_holding_pct, prepare_moneydj_insti
 from tests.conftest import FakeSession
 from tw_stock_rawdata.sources import DataUnavailableError, fetch_moneydj_holding_pct
 
@@ -153,6 +153,55 @@ def test_renamed_holding_pct_group_raises() -> None:
     html = _fixture_html().replace("colspan=2 nowrap>持股比重", "colspan=2 nowrap>持股比率", 1)
 
     with pytest.raises(DataUnavailableError, match="持股比重"):
+        _fetch(html)
+
+
+def _replace_nth(text: str, old: str, new: str, n: int) -> str:
+    """只換第 n 個（1 起算）：子表頭的「投信」「單日合計」各出現兩次，要能只動估計持股那組。"""
+    idx = -1
+    for _ in range(n):
+        idx = text.index(old, idx + 1)
+    return text[:idx] + new + text[idx + len(old):]
+
+
+def test_real_page_maps_columns_6_8_to_trust_and_total_estimated_holding() -> None:
+    """投信持股比例由 col 6（投信估計持股）與 col 8（單日合計估計持股）反推，位置同樣要釘住。"""
+    raw = _fetch(_fixture_html())
+
+    first = raw.iloc[0]
+    assert first["trust_holding_lots"] == "618021"
+    assert first["insti_holding_lots"] == "19916237"
+
+    # 一路接到 prepare：76.79% × 618,021 ÷ 19,916,237 → 0.0238
+    row = prepare_moneydj_holding_pct(raw).set_index("date").loc[dt.date(2025, 7, 31)]
+    assert row["trust_holding_pct"] == 0.0238
+
+
+def test_renamed_estimated_holding_group_raises() -> None:
+    html = _fixture_html().replace("colspan=4 nowrap>估計持股", "colspan=4 nowrap>庫存估計", 1)
+
+    with pytest.raises(DataUnavailableError, match="估計持股"):
+        _fetch(html)
+
+
+def test_swapped_estimated_holding_sub_headers_raise() -> None:
+    """估計持股組內投信／自營商對調 → col 6 變成自營商，會把自營商持股當成投信。"""
+    html = _replace_nth(
+        _fixture_html(),
+        'nowrap>投信</td>\r\n<td class="t2" nowrap>自營商</td>',
+        'nowrap>自營商</td>\r\n<td class="t2" nowrap>投信</td>',
+        2,
+    )
+
+    with pytest.raises(DataUnavailableError, match="外資／投信／自營商／單日合計"):
+        _fetch(html)
+
+
+def test_renamed_estimated_holding_total_raises() -> None:
+    """col 8 是反推分母用的合計，換成別的欄位要擋下來。"""
+    html = _replace_nth(_fixture_html(), "nowrap>單日合計</td>", "nowrap>三大法人合計</td>", 2)
+
+    with pytest.raises(DataUnavailableError, match="外資／投信／自營商／單日合計"):
         _fetch(html)
 
 

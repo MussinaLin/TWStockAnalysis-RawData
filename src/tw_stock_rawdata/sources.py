@@ -984,14 +984,16 @@ def fetch_moneydj_margin(
 def _check_moneydj_zcl_header(table: pd.DataFrame) -> None:
     """驗證 MoneyDJ zcl 表頭結構，對不上就拋 `DataUnavailableError`。
 
-    zcl 的欄位全靠**位置**取（col 1-3 三大法人買賣超、col 9-10 持股比重），
-    而 row 6 的子表頭無法單獨定位：「外資」在 row 6 出現兩次（index 1 屬買賣超、
-    index 5 屬估計持股），只有 row 5 的分組表頭分得出兩組，所以兩列必須一起驗。
+    zcl 的欄位全靠**位置**取（col 1-3 三大法人買賣超、col 6 / 8 投信與合計估計持股、
+    col 9-10 持股比重），而 row 6 的子表頭無法單獨定位：「外資」在 row 6 出現兩次
+    （index 1 屬買賣超、index 5 屬估計持股），只有 row 5 的分組表頭分得出兩組，
+    所以兩列必須一起驗。
 
     為什麼一定要擋：col 1-3 是純整數，MoneyDJ 若插入/移除一欄，錯位後會把投信的
     數字寫進 `foreign_net`——數量級合理、不會拋例外、也不會變成 NULL，等於永久
     寫錯資料。拋出後 `--backfill-stocks` 會判定該檔 `insti_ok=False` 整檔跳過，
-    操作者看得見，這正是設計對 MoneyDJ 失敗既定的處理方式。
+    操作者看得見，這正是設計對 MoneyDJ 失敗既定的處理方式。col 6 / 8 是反推
+    投信持股比例的分子與分母，錯位同樣會算出看不出來的錯值，一併驗。
     """
 
     def cell(row: pd.Series, idx: int) -> str:
@@ -1021,6 +1023,19 @@ def _check_moneydj_zcl_header(table: pd.DataFrame) -> None:
             f"MoneyDJ zcl 表頭結構改變：col 1-3 不是外資／投信／自營商（{sub_headers}）"
         )
 
+    groups_estimated = [cell(row5, i) for i in range(5, 9)]
+    estimated_sub_headers = [cell(row6, i) for i in range(5, 9)]
+
+    if groups_estimated != ["估計持股"] * 4:
+        raise DataUnavailableError(
+            f"MoneyDJ zcl 表頭結構改變：col 5-8 的分組不是「估計持股」（{groups_estimated}）"
+        )
+    if estimated_sub_headers != ["外資", "投信", "自營商", "單日合計"]:
+        raise DataUnavailableError(
+            "MoneyDJ zcl 表頭結構改變：col 5-8 不是外資／投信／自營商／單日合計"
+            f"（{estimated_sub_headers}）"
+        )
+
 
 def fetch_moneydj_holding_pct(
     session: requests.Session,
@@ -1039,7 +1054,8 @@ def fetch_moneydj_holding_pct(
     Returns:
         DataFrame with columns: date, foreign_net_lots, trust_net_lots,
         dealer_net_lots (買賣超，單位張), foreign_holding_pct, insti_holding_pct
-        (percentage strings like "35.03%")
+        (percentage strings like "35.03%"), trust_holding_lots, insti_holding_lots
+        (估計持股：投信 / 單日合計，單位張；供 prepare 反推投信持股比例)
     """
     start_str = f"{start.year}-{start.month}-{start.day}"
     end_str = f"{end.year}-{end.month}-{end.day}"
@@ -1090,6 +1106,7 @@ def fetch_moneydj_holding_pct(
     #   5-8   估計持股：外資 / 投信 / 自營商 / 單日合計
     #   9-10  持股比重：外資 / 三大法人
     # 三大法人買賣超與持股比重在**同一頁**，所以取三大法人不需要額外 HTTP 請求。
+    # 估計持股只取 col 6（投信）與 col 8（單日合計），用來反推投信持股比例。
     # 這個位置對映的正確性由上面的 `_check_moneydj_zcl_header` 把關，不可省略。
     # 這裡只做欄位切出，型別轉換留給 prepare_moneydj_holding_pct /
     # prepare_moneydj_insti，維持 fetch 層只負責取得與定位的分工。
@@ -1100,6 +1117,8 @@ def fetch_moneydj_holding_pct(
     result["dealer_net_lots"] = data_rows.iloc[:, 3].values
     result["foreign_holding_pct"] = data_rows.iloc[:, 9].values
     result["insti_holding_pct"] = data_rows.iloc[:, 10].values
+    result["trust_holding_lots"] = data_rows.iloc[:, 6].values
+    result["insti_holding_lots"] = data_rows.iloc[:, 8].values
 
     return result
 

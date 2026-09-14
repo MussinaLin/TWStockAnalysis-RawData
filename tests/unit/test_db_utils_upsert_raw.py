@@ -145,5 +145,18 @@ def test_raw_column_lists_stay_in_sync() -> None:
     ]
 
 
+def test_upsert_writes_trust_holding_pct(monkeypatch):
+    """trust_holding_pct 要進 INSERT 欄位，值落在該欄對應的位置。"""
+    cur = FakeCursor()
+    _install(monkeypatch, cur)
+
+    df = _sample_df().assign(trust_holding_pct=0.0238)
+    db_utils.upsert_daily_raw("postgres://x", dt.date(2026, 5, 13), df)
+
+    sql, params = cur.executed_many[0]
+    insert_cols = sql.split("(", 1)[1].split(")", 1)[0].split(", ")
+    assert params[0][insert_cols.index("trust_holding_pct")] == 0.0238
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

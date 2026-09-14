@@ -89,6 +89,54 @@ class TestPrepareMoneydjHoldingPct:
         out = prepare_moneydj_holding_pct(df)
         assert len(out) == 1
 
+    @staticmethod
+    def _trust_df(insti_pct: str, trust_lots: str, insti_lots: str) -> pd.DataFrame:
+        return pd.DataFrame({
+            "date": ["114/07/31"],
+            "foreign_holding_pct": ["73.54%"],
+            "insti_holding_pct": [insti_pct],
+            "trust_holding_lots": [trust_lots],
+            "insti_holding_lots": [insti_lots],
+        })
+
+    def test_trust_holding_pct_derived_from_insti_pct(self) -> None:
+        """2330 / 2025-07-31：76.79% × 618,021 ÷ 19,916,237 = 2.3829% → 0.0238。
+
+        與用股本 25,935,030,992 股直接算的結果相同：分母由同一天的三大法人比例
+        反推，就是 MoneyDJ 當天用的分母（stocks.issued_shares 只是目前的快照）。
+        """
+        out = prepare_moneydj_holding_pct(self._trust_df("76.79%", "618021", "19916237"))
+        assert out.iloc[0]["trust_holding_pct"] == 0.0238
+
+    def test_trust_holding_pct_accepts_thousands_separators(self) -> None:
+        out = prepare_moneydj_holding_pct(
+            self._trust_df("76.79%", "618,021", "19,916,237")
+        )
+        assert out.iloc[0]["trust_holding_pct"] == 0.0238
+
+    def test_trust_holding_pct_zero_when_trust_holds_nothing(self) -> None:
+        out = prepare_moneydj_holding_pct(self._trust_df("0.00%", "0", "0"))
+        assert out.iloc[0]["trust_holding_pct"] == 0.0
+
+    @pytest.mark.parametrize("insti_lots", ["0", "-10"])
+    def test_trust_holding_pct_null_when_total_not_positive(self, insti_lots: str) -> None:
+        """合計 ≤ 0 卻有投信持股 → 反推不出分母，寫 NULL，不可除以零或得出負比例。"""
+        out = prepare_moneydj_holding_pct(self._trust_df("0.01%", "5", insti_lots))
+        assert pd.isna(out.iloc[0]["trust_holding_pct"])
+
+    def test_trust_holding_pct_null_when_insti_pct_unparsable(self) -> None:
+        out = prepare_moneydj_holding_pct(self._trust_df("--", "618021", "19916237"))
+        assert pd.isna(out.iloc[0]["trust_holding_pct"])
+
+    def test_trust_holding_pct_null_when_lots_columns_absent(self) -> None:
+        df = pd.DataFrame({
+            "date": ["114/07/31"],
+            "foreign_holding_pct": ["73.54%"],
+            "insti_holding_pct": ["76.79%"],
+        })
+        out = prepare_moneydj_holding_pct(df)
+        assert pd.isna(out.iloc[0]["trust_holding_pct"])
+
 
 def test_both_preparers_parse_dates_identically() -> None:
     """兩個 normalize 的日期解析必須一致——這是它們可以共用同一個 helper 的前提。"""

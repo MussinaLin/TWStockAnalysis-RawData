@@ -1162,6 +1162,7 @@ def _holding_pct_by_date(df: pd.DataFrame) -> dict[dt.date, dict]:
         by_date[row_date] = {
             "foreign_holding_pct": row.get("foreign_holding_pct"),
             "insti_holding_pct": row.get("insti_holding_pct"),
+            "trust_holding_pct": row.get("trust_holding_pct"),
         }
     return by_date
 
@@ -1171,7 +1172,7 @@ def _resolve_holding_pct(
     date: dt.date,
     holding_pct_cache: dict[str, dict[dt.date, dict]] | None,
 ) -> dict:
-    """外資 / 法人持股比例：只從逐檔預抓的 cache 取，沒有就回空 dict。"""
+    """外資 / 法人 / 投信持股比例：只從逐檔預抓的 cache 取，沒有就回空 dict。"""
     if holding_pct_cache is not None and symbol in holding_pct_cache:
         return holding_pct_cache[symbol].get(date, {})
     return {}
@@ -1298,6 +1299,7 @@ def _build_daily_rows(
             "short_margin_ratio": short_margin_ratio,
             "foreign_holding_pct": holding_pct.get("foreign_holding_pct"),
             "insti_holding_pct": holding_pct.get("insti_holding_pct"),
+            "trust_holding_pct": holding_pct.get("trust_holding_pct"),
             "limit_up": limit_up,
             "limit_down": limit_down,
             "is_disposition": is_disposition,
@@ -1671,7 +1673,8 @@ def _prefetch_holding_pct_cache(
     """Pre-fetch institutional holding percentage for all stocks in date range.
 
     Returns:
-        Dict mapping symbol -> date -> {"foreign_holding_pct": x, "insti_holding_pct": y}
+        Dict mapping symbol -> date ->
+        {"foreign_holding_pct": x, "insti_holding_pct": y, "trust_holding_pct": z}
     """
     cache: dict[str, dict[dt.date, dict]] = {}
     total = len(holdings)

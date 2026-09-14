@@ -230,6 +230,7 @@ def test_per_symbol_range_provider_fetches_holding_pct_once_per_symbol(
             "foreign_net_lots": ["9040"], "trust_net_lots": ["-1293"],
             "dealer_net_lots": ["1612"],
             "foreign_holding_pct": ["73.54%"], "insti_holding_pct": ["76.79%"],
+            "trust_holding_lots": ["618021"], "insti_holding_lots": ["19916237"],
         })
 
     monkeypatch.setattr(run, "fetch_moneydj_holding_pct", _fake_holding_pct)
@@ -266,6 +267,7 @@ def test_per_symbol_range_provider_fetches_holding_pct_once_per_symbol(
     for _, row in output_df.iterrows():
         assert row["foreign_holding_pct"] == pytest.approx(0.7354)
         assert row["insti_holding_pct"] == pytest.approx(0.7679)
+        assert row["trust_holding_pct"] == 0.0238
 
 
 def test_reversed_backfill_range_is_normalized_before_prefetch(monkeypatch) -> None:

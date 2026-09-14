@@ -1,6 +1,6 @@
 # TWStockAnalysis-RawData
 
-每日抓取台股 raw data（OHLCV、三大法人、融資融券、發行股數、處置股註記、大盤行情），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
+每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
 
 ## 職責邊界
 
@@ -150,13 +150,36 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 已存在的 row（不新增 row）。與 `--backfill-limits` 不同，它**支援** `--backfill-stocks`
 限定股票。兩市場名單皆取得失敗時直接放棄、不寫入。結果冪等，可重複執行，不需 `--force`。
 
+### 持股比例（foreign / insti / trust_holding_pct）
+
+`stock_daily_raw` 的 `foreign_holding_pct` / `insti_holding_pct` / `trust_holding_pct`
+分別是外資、三大法人合計、投信的持股比例（小數，如 `0.0238` = 2.38%）。三欄都來自
+MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求，不額外打 API。
+
+- 頁面只給外資與三大法人的持股比例，投信的要自己算：
+  `trust_holding_pct = insti_holding_pct × 投信估計持股 ÷ 三大法人合計估計持股`。
+  分母由同一天頁面上的比例反推，就是 MoneyDJ 當天用的股本。
+  例：2330 / 2025-07-31 為 76.79% × 618,021 ÷ 19,916,237 = `0.0238`，
+  與拿股本 25,935,030,992 股直接算的結果相同。
+- **不用 `stocks.issued_shares` 當分母**：那是目前的股本快照，回補歷史時遇到增資、
+  減資、配股，舊日期的分母就是錯的。
+- 精度與另外兩欄相同（`NUMERIC(8,4)`，到 0.01 個百分點）：`insti_holding_pct` 只有
+  兩位小數，反推後誤差不超過 ±0.005 個百分點，多存位數是假精度。
+- 合計估計持股 ≤ 0 卻有投信持股時反推不出分母，寫 `NULL`；投信估計持股為 0 時寫 `0`。
+- `zcl` 靠欄位位置取值，表頭結構（含估計持股的第 5–8 欄）不符時整頁拒收，
+  不會把錯位的數字寫進去。
+
+> **投信持股是估計值，不是官方數字**。交易所每天只公布外資持股；投信、自營商的
+> 「持股」是 MoneyDJ 從歷來買賣超累加推估的（推估值為負時照存，不修正）。
+> 適合看趨勢，不適合當精確持股使用。
+
 ### 回補特定股票（--backfill-stocks）
 
 `--backfill-stocks` 走 **per-stock 區間抓取**，與其他回補模式的成本結構不同：
 
 - OHLCV + 漲跌價差：每檔**每月 1 次**請求（上市走 TWSE `STOCK_DAY`、
   上櫃走 TPEX 個股月表 `afterTrading/tradingStock`）
-- 三大法人：每檔**整段 1 次**請求（MoneyDJ `zcl`，與外資/法人持股佔比同一頁，
+- 三大法人：每檔**整段 1 次**請求（MoneyDJ `zcl`，與外資/法人/投信持股佔比同一頁，
   故為零額外請求）
 - 融資融券：每檔整段 1 次（MoneyDJ）
 - 處置股名單：兩市場各切成 ≤ 6 個月的窗口查詢（回補 3 年共 14 次，見上一節）

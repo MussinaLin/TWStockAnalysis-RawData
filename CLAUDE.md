@@ -83,6 +83,11 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
   10 個營業日、公告日又早於期間起日，只查當日會漏掉正處在處置期間中段的個股。
   端點吃區間查詢，窗口拉長不增加請求數。同理**不要**改用 OpenAPI 快照版
   （`announcement/punish`、`tpex_disposal_information`）—— 那兩支只回最近幾個公布日。
+- **`trust_holding_pct` 的分母不用 `stocks.issued_shares`**：頁面沒給投信持股比例，
+  由同頁 `insti_holding_pct × 投信估計持股 ÷ 合計估計持股` 反推（見
+  `prepare_moneydj_holding_pct`），分母就是 MoneyDJ 當天用的股本。`issued_shares`
+  是目前的快照，回補歷史遇到增資、減資、配股會算錯。zcl 全靠位置取欄，第 6 / 8 欄
+  由 `_check_moneydj_zcl_header` 驗表頭，不可省略。
 - **`change` 不可取自 `STOCK_DAY_ALL`**：漲跌價差只從 `MI_INDEX`（上市）與 TPEX
   quotes（上櫃）取。`STOCK_DAY_ALL` 在除權息日給 `Change=0.0000` 且無任何標記，
   而它是 `_fetch_ohlcv_with_fallback` 的第一順位；若讓它供應 change，除權息日會

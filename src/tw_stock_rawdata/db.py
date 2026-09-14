@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS stock_daily_raw (
     short_margin_ratio          NUMERIC(8,6),
     foreign_holding_pct         NUMERIC(8,4),
     insti_holding_pct           NUMERIC(8,4),
+    trust_holding_pct           NUMERIC(8,4),
     limit_up                    NUMERIC(12,2),
     limit_down                  NUMERIC(12,2),
     is_disposition              BOOLEAN,
@@ -163,6 +164,11 @@ ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS limit_down NUMERIC(12,2);
 --   前一段處置留下的分鐘數會永遠清不掉，變成「非處置卻每 20 分鐘撮合」的矛盾列。
 ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS is_disposition            BOOLEAN;
 ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS disposition_match_minutes SMALLINT;
+
+-- 既有資料庫的線上 migration：補上後加的投信持股比例欄（idempotent）。
+-- trust_holding_pct：MoneyDJ 投信估計持股 ÷ 股本，分母由同頁的三大法人比例反推
+--   （見 prepare_moneydj_holding_pct）。是 MoneyDJ 以累計買賣超推估的值，非官方數字。
+ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS trust_holding_pct NUMERIC(8,4);
 
 -- Triggers for updated_time
 DO $$

@@ -20,12 +20,15 @@ JUL31 = dt.date(2025, 7, 31)
 def test_holding_pct_by_date_keys_on_date_and_skips_non_date_rows() -> None:
     """合計列之類的非日期列混進來，cache 的鍵就不再全是日期。"""
     df = pd.DataFrame([
-        {"date": JUL31, "foreign_holding_pct": 0.7354, "insti_holding_pct": 0.7679},
-        {"date": "合計", "foreign_holding_pct": 0.1, "insti_holding_pct": 0.2},
+        {"date": JUL31, "foreign_holding_pct": 0.7354, "insti_holding_pct": 0.7679,
+         "trust_holding_pct": 0.0238},
+        {"date": "合計", "foreign_holding_pct": 0.1, "insti_holding_pct": 0.2,
+         "trust_holding_pct": 0.05},
     ])
 
     assert run._holding_pct_by_date(df) == {
-        JUL31: {"foreign_holding_pct": 0.7354, "insti_holding_pct": 0.7679},
+        JUL31: {"foreign_holding_pct": 0.7354, "insti_holding_pct": 0.7679,
+                "trust_holding_pct": 0.0238},
     }
 
 
@@ -39,6 +42,8 @@ def test_prefetch_holding_pct_cache_keeps_failed_symbol_as_empty(monkeypatch) ->
             "date": ["114/07/31"],
             "foreign_holding_pct": ["73.54%"],
             "insti_holding_pct": ["76.79%"],
+            "trust_holding_lots": ["618021"],
+            "insti_holding_lots": ["19916237"],
         })
 
     monkeypatch.setattr(run, "fetch_moneydj_holding_pct", fake_fetch)
@@ -49,6 +54,7 @@ def test_prefetch_holding_pct_cache_keeps_failed_symbol_as_empty(monkeypatch) ->
     )
 
     assert cache == {
-        "2330": {JUL31: {"foreign_holding_pct": 0.7354, "insti_holding_pct": 0.7679}},
+        "2330": {JUL31: {"foreign_holding_pct": 0.7354, "insti_holding_pct": 0.7679,
+                         "trust_holding_pct": 0.0238}},
         "9999": {},
     }
