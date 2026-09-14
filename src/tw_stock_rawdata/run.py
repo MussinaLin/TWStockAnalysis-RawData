@@ -1020,15 +1020,7 @@ class PerSymbolRangeProvider:
                         row.get("dealer_net"),
                     )
 
-                holding_pct_df = prepare_moneydj_holding_pct(raw)
-                for _, row in holding_pct_df.iterrows():
-                    row_date = row["date"]
-                    if not isinstance(row_date, dt.date):
-                        continue
-                    holding_pct_map[row_date] = {
-                        "foreign_holding_pct": row.get("foreign_holding_pct"),
-                        "insti_holding_pct": row.get("insti_holding_pct"),
-                    }
+                holding_pct_map = _holding_pct_by_date(prepare_moneydj_holding_pct(raw))
 
                 insti_ok = True
             except (DataUnavailableError, requests.RequestException) as exc:
@@ -1155,6 +1147,23 @@ def _resolve_margin_data(
     if margin_cache is not None and symbol in margin_cache and date in margin_cache[symbol]:
         return margin_cache[symbol][date]
     return _get_margin_data(symbol, twse_margin, tpex_margin)
+
+
+def _holding_pct_by_date(df: pd.DataFrame) -> dict[dt.date, dict]:
+    """把 `prepare_moneydj_holding_pct` 的結果轉成 {date: {持股佔比欄: 值}}。
+
+    非 date 型別的列跳過：MoneyDJ 表格常帶合計列，混進去會讓 cache 的鍵不是日期。
+    """
+    by_date: dict[dt.date, dict] = {}
+    for _, row in df.iterrows():
+        row_date = row["date"]
+        if not isinstance(row_date, dt.date):
+            continue
+        by_date[row_date] = {
+            "foreign_holding_pct": row.get("foreign_holding_pct"),
+            "insti_holding_pct": row.get("insti_holding_pct"),
+        }
+    return by_date
 
 
 def _resolve_holding_pct(
@@ -1676,16 +1685,7 @@ def _prefetch_holding_pct_cache(
         cache[symbol] = {}
         try:
             raw = fetch_moneydj_holding_pct(session, symbol, start_date, end_date)
-            df = prepare_moneydj_holding_pct(raw)
-
-            for _, row in df.iterrows():
-                row_date = row["date"]
-                if not isinstance(row_date, dt.date):
-                    continue
-                cache[symbol][row_date] = {
-                    "foreign_holding_pct": row.get("foreign_holding_pct"),
-                    "insti_holding_pct": row.get("insti_holding_pct"),
-                }
+            cache[symbol] = _holding_pct_by_date(prepare_moneydj_holding_pct(raw))
         except (DataUnavailableError, requests.RequestException) as exc:
             print(f"    {symbol} 法人持股取得失敗：{exc}")
 
@@ -2135,7 +2135,8 @@ def _fetch_holding_pct_per_symbol(
 
     daily 模式不帶 cache，故此處是逐檔對 MoneyDJ 各打一次。失敗一律吞掉——
     持股佔比不納入 _stock_sources_ok，抓不到不該讓整檔個股跳過不寫。
-    非 date 型別的列跳過：MoneyDJ 表格常帶合計列，混進去會讓 cache 的鍵不是日期。
+    失敗的個股不放進 cache（區間預取則會留一個空 dict），`_resolve_holding_pct`
+    對兩者一視同仁。
     """
     cache: dict[str, dict[dt.date, dict]] = {}
     with _phase(f"{sheet_name} 外資/法人持股佔比（逐檔 {len(holdings)} 檔）"):
@@ -2143,15 +2144,7 @@ def _fetch_holding_pct_per_symbol(
             symbol = str(item["symbol"]).strip()
             try:
                 raw = fetch_moneydj_holding_pct(session, symbol, date, date)
-                df = prepare_moneydj_holding_pct(raw)
-                cache[symbol] = {}
-                for _, row in df.iterrows():
-                    row_date = row["date"]
-                    if isinstance(row_date, dt.date):
-                        cache[symbol][row_date] = {
-                            "foreign_holding_pct": row.get("foreign_holding_pct"),
-                            "insti_holding_pct": row.get("insti_holding_pct"),
-                        }
+                cache[symbol] = _holding_pct_by_date(prepare_moneydj_holding_pct(raw))
             except (DataUnavailableError, requests.RequestException):
                 pass
     return cache
