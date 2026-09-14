@@ -26,9 +26,11 @@ from .db_utils import (
     load_stock_names,
     load_stock_shares,
     load_symbols_for_date,
+    load_symbols_in_range,
     update_disposition_batch,
     update_prev_day_margin_batch,
     update_price_limits_batch,
+    update_trust_holding_batch,
     upsert_daily_raw,
     upsert_holder_percent,
     upsert_market_daily,
@@ -355,6 +357,7 @@ def _is_daily_mode(args: argparse.Namespace) -> bool:
         or args.backfill_stocks
         or args.backfill_limits
         or args.backfill_disposition
+        or args.backfill_trust_holding
         or args.update_shares
         or args.dahu
     )
@@ -396,6 +399,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backfill-disposition", action="store_true",
         help="只回補 is_disposition / disposition_match_minutes"
+             "（需搭配 --backfill-start / --backfill-end，可選 --backfill-stocks）",
+    )
+    parser.add_argument(
+        "--backfill-trust-holding", action="store_true",
+        help="只回補 trust_holding_pct（投信持股比例）"
              "（需搭配 --backfill-start / --backfill-end，可選 --backfill-stocks）",
     )
     parser.add_argument(
@@ -833,6 +841,71 @@ def _backfill_disposition_command(
         print(f"{date.isoformat()} 更新 {n_updated} 檔（其中處置中 {n_disposed} 檔）")
 
     print(f"處置股回補完成，共更新 {total} 列")
+
+
+def _backfill_trust_holding_command(
+    session: requests.Session,
+    config: AppConfig,
+    args: argparse.Namespace,
+) -> None:
+    """--backfill-trust-holding：只回補 stock_daily_raw 的 trust_holding_pct。
+
+    逐檔而非逐日：每檔整段只打 1 次 MoneyDJ zcl（實測 3 年一次查詢不截斷）。只 UPDATE
+    已存在的列、只寫這一欄，算不出來的日期跳過（不以 NULL 覆寫）。對象是區間內 DB 已有
+    資料的個股（含現已停用者），可用 --backfill-stocks 限縮——逐檔註記限縮沒有副作用，
+    理由同 --backfill-disposition。
+    """
+    if args.date:
+        print("警告：--backfill-trust-holding 已啟用，--date 將被忽略")
+
+    if not args.backfill_start or not args.backfill_end:
+        print("錯誤：--backfill-trust-holding 需搭配 --backfill-start 和 --backfill-end")
+        return
+
+    dates = _build_date_range(
+        _parse_date(args.backfill_start), _parse_date(args.backfill_end)
+    )
+    start, end = dates[0], dates[-1]
+
+    symbols = load_symbols_in_range(config.database_url, start, end)
+    if args.backfill_stocks:
+        only_symbols = {s.strip() for s in args.backfill_stocks.split(",") if s.strip()}
+        if not only_symbols:
+            print("錯誤：--backfill-stocks 未指定任何股票代號")
+            return
+        symbols = [s for s in symbols if s in only_symbols]
+    if not symbols:
+        print(f"{start} ~ {end} DB 無資料，略過")
+        return
+
+    print(f"回補投信持股比例 {len(symbols)} 檔：{start} ~ {end}")
+
+    total = 0
+    failed: list[str] = []
+    for idx, symbol in enumerate(symbols, start=1):
+        try:
+            raw = fetch_moneydj_holding_pct(session, symbol, start, end)
+            by_date = _holding_pct_by_date(prepare_moneydj_holding_pct(raw))
+        except (DataUnavailableError, requests.RequestException) as exc:
+            print(f"  {idx}/{len(symbols)} {symbol} MoneyDJ 取得失敗：{exc}")
+            failed.append(symbol)
+            continue
+
+        updates = [
+            (symbol, date, float(values["trust_holding_pct"]))
+            for date, values in sorted(by_date.items())
+            if start <= date <= end and not pd.isna(values["trust_holding_pct"])
+        ]
+        n_updated = update_trust_holding_batch(config.database_url, updates)
+        total += n_updated
+        print(f"  {idx}/{len(symbols)} {symbol} 更新 {n_updated} 列")
+
+    print(f"投信持股比例回補完成，共更新 {total} 列")
+    if failed:
+        print(
+            f"⚠ MoneyDJ 取得失敗 {len(failed)} 檔，未回補（可用 --backfill-stocks 重跑）："
+            f"{','.join(failed)}"
+        )
 
 
 class RowSourceProvider(Protocol):
@@ -2604,6 +2677,11 @@ def _main_inner(
     # --backfill-disposition mode：只回補處置股兩欄
     if args.backfill_disposition:
         _backfill_disposition_command(session, config, args)
+        return
+
+    # --backfill-trust-holding mode：只回補投信持股比例一欄
+    if args.backfill_trust_holding:
+        _backfill_trust_holding_command(session, config, args)
         return
 
     # --backfill-stocks mode

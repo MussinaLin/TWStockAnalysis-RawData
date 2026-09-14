@@ -398,6 +398,47 @@ def update_disposition_batch(
     return n_updated
 
 
+def update_trust_holding_batch(
+    database_url: str,
+    updates: list[tuple[str, dt.date, float]],
+) -> int:
+    """批次覆寫 stock_daily_raw 的 trust_holding_pct。
+
+    只 UPDATE 已存在的 row，不 INSERT：理由同 update_price_limits_batch —— 回補只有
+    這一欄有值，走 upsert 會 INSERT 出一批其餘欄位全 NULL 的半套 row。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        updates: list of (symbol, trade_date, trust_holding_pct)。算不出來的值由
+                 呼叫端濾掉，這裡不寫 NULL。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計（不存在的 (symbol, trade_date) 不算）。
+    """
+    if not updates:
+        return 0
+
+    n_updated = 0
+    with _connect(database_url) as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(updates), _BATCH_UPDATE_CHUNK):
+                chunk = updates[start:start + _BATCH_UPDATE_CHUNK]
+                values = ", ".join(
+                    ["(%s::varchar, %s::date, %s::numeric)"] * len(chunk)
+                )
+                sql = (
+                    "UPDATE stock_daily_raw AS t"
+                    " SET trust_holding_pct = v.trust_holding_pct"
+                    f" FROM (VALUES {values})"
+                    " AS v(symbol, trade_date, trust_holding_pct)"
+                    " WHERE t.symbol = v.symbol AND t.trade_date = v.trade_date"
+                )
+                cur.execute(sql, [x for row in chunk for x in row])
+                n_updated += cur.rowcount
+        conn.commit()
+    return n_updated
+
+
 def load_symbols_for_date(database_url: str, trade_date: dt.date) -> set[str]:
     """回傳該交易日在 stock_daily_raw 已存在的 symbol 集合。
 
@@ -409,6 +450,23 @@ def load_symbols_for_date(database_url: str, trade_date: dt.date) -> set[str]:
             "SELECT symbol FROM stock_daily_raw WHERE trade_date = %s", (trade_date,)
         ).fetchall()
     return {r[0] for r in rows}
+
+
+def load_symbols_in_range(
+    database_url: str, start: dt.date, end: dt.date
+) -> list[str]:
+    """回傳區間內在 stock_daily_raw 出現過的 symbol（去重、排序）。
+
+    給 --backfill-trust-holding 決定要回補哪些檔：用 DB 既有列而非 stocks.enabled，
+    才涵蓋區間內有資料、但現在已停用的個股。
+    """
+    with _connect(database_url) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT symbol FROM stock_daily_raw"
+            " WHERE trade_date BETWEEN %s AND %s",
+            (start, end),
+        ).fetchall()
+    return sorted({r[0] for r in rows})
 
 
 # ---------------------------------------------------------------------------

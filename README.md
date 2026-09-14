@@ -61,6 +61,9 @@ tw-stock-rawdata --backfill-disposition --backfill-start 2025-01-01 --backfill-e
 tw-stock-rawdata --backfill-disposition --backfill-stocks 2330,2317 \
     --backfill-start 2025-01-01 --backfill-end 2026-08-12
 
+# 只回補投信持股比例（trust_holding_pct），可選 --backfill-stocks 限定股票
+tw-stock-rawdata --backfill-trust-holding --backfill-start 2024-01-02 --backfill-end 2026-09-14
+
 # 強制覆蓋既有資料
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force
 
@@ -172,6 +175,13 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
 > **投信持股是估計值，不是官方數字**。交易所每天只公布外資持股；投信、自營商的
 > 「持股」是 MoneyDJ 從歷來買賣超累加推估的（推估值為負時照存，不修正）。
 > 適合看趨勢，不適合當精確持股使用。
+
+歷史資料可用 `--backfill-trust-holding` 回補：對區間內 DB 已有資料的個股（含現已停用者）
+逐檔整段只打 1 次 MoneyDJ（請求數 = 檔數，與區間長短無關；實測 3 年一次查詢不截斷），
+只 `UPDATE` 已存在的 row、只寫這一欄，算不出來的日期跳過、不寫 `NULL`。支援
+`--backfill-stocks` 限定股票；某檔 MoneyDJ 失敗時繼續下一檔，收尾列出失敗代號供重跑。
+結果冪等，可重複執行，不需 `--force`。之後的新資料不必再回補：daily、一般區間回補、
+`--backfill-stocks` 都會寫這一欄。
 
 ### 回補特定股票（--backfill-stocks）
 
@@ -336,7 +346,7 @@ docker compose --profile app run --rm rawdata --date 2025-10-15
 
 ```bash
 pip install -e ".[test]"
-pytest                     # 全部（638 個，無網路、無 DB）
+pytest                     # 全部（668 個，無網路、無 DB）
 
 # 覆蓋率
 pytest --cov=src/tw_stock_rawdata --cov-report=term-missing
@@ -357,11 +367,11 @@ pytest --cov=src/tw_stock_rawdata --cov-report=term-missing
 | `price_limit.py` | 100% |
 | `db_utils.py` | 99% |
 | `config.py` | 90% |
-| `run.py` | 85% |
+| `run.py` | 88% |
 | `sources.py` | 81% |
-| `prepare.py` | 75% |
+| `prepare.py` | 76% |
 | `db.py` | 37% |
-| **總計** | **83%** |
+| **總計** | **85%** |
 
-`db.py` 偏低是因為它主體是 147 行的 schema DDL 字串與連線池，需要真的 DB 才走得到；
+`db.py` 偏低是因為它主體是約 150 行的 schema DDL 字串與連線池，需要真的 DB 才走得到；
 其邏輯分支極少（radon 平均 CC 1.75，無任何 rank B 以上函式）。

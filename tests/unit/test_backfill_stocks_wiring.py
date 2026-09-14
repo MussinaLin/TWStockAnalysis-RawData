@@ -308,7 +308,7 @@ def test_reversed_backfill_range_is_normalized_before_prefetch(monkeypatch) -> N
 
     args = argparse.Namespace(
         date=None, dahu=False, update_shares=False,
-        backfill_limits=False, backfill_disposition=False,
+        backfill_limits=False, backfill_disposition=False, backfill_trust_holding=False,
         backfill_stocks="2330",
         backfill_start="2025-10-15", backfill_end="2025-08-01",  # 顛倒
         force=False,
