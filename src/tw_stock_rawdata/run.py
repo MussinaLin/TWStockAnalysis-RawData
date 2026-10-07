@@ -2008,7 +2008,7 @@ def _resolve_margin_sources(
     2. `date == today` → 走全市場整批 API。TPEX 先試 V2（支援日期參數），
        失敗或日期不符再退回 OpenAPI 快照。
     3. 其餘（歷史單日回補，無 cache）→ 逐檔打 MoneyDJ，組成一張形狀等同
-       twse_margin 的表；失敗一律吞掉（融資融券非必要欄位，不 gating）。
+       twse_margin 的表；逐檔失敗印出原因後續行（融資融券非必要欄位，不 gating）。
 
     各來源都嚴格驗資料日期 == 請求日期：TWSE 尚未發布時會回前一日的資料，
     寫下去等於把 D-1 的值標成 D。缺值由 D+1 的 MoneyDJ 修正機制補。
@@ -2075,7 +2075,7 @@ def _fetch_margin_from_moneydj(
     """歷史單日回補（無 cache）：逐檔打 MoneyDJ，只取目標日那一列。
 
     往前多抓 10 天是因為 MoneyDJ 的區間查詢對單日常回空；抓一小段再自己挑。
-    失敗一律靜默跳過——融資融券不納入 _stock_sources_ok，缺了不該讓整檔跳過。
+    失敗印出原因後跳過——融資融券不納入 _stock_sources_ok，缺了不該讓整檔跳過。
     回傳的表形狀等同 twse_margin，由呼叫端當成 TWSE 來源傳下去。
     """
     margin_rows = []
@@ -2090,8 +2090,8 @@ def _fetch_margin_from_moneydj(
                 row_data = row.iloc[0].to_dict()
                 row_data["symbol"] = symbol
                 margin_rows.append(row_data)
-        except (DataUnavailableError, requests.RequestException):
-            pass
+        except (DataUnavailableError, requests.RequestException) as exc:
+            print(f"    {symbol} 融資融券取得失敗：{exc}")
     return pd.DataFrame(margin_rows) if margin_rows else None
 
 

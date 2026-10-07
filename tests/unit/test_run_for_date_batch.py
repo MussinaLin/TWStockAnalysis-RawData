@@ -248,6 +248,13 @@ class TestMarginBranches:
         _run(date=PAST, today=TODAY)
         assert seen == ["2330", "6488"]
 
+    def test_historical_moneydj_failure_is_logged(self, wiring, capsys) -> None:
+        """融資融券不 gating，但逐檔失敗不可靜默——要印出哪一檔、為什麼。"""
+        _run(date=PAST, today=TODAY)  # wiring 預設 fetch_moneydj_margin 丟 DataUnavailableError("no")
+        out = capsys.readouterr().out
+        assert "2330 融資融券取得失敗：no" in out
+        assert "6488 融資融券取得失敗：no" in out
+
     def test_historical_date_does_not_use_batch_apis(self, wiring, monkeypatch) -> None:
         hits = {"n": 0}
         monkeypatch.setattr(
