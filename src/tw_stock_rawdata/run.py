@@ -1479,7 +1479,7 @@ def _fill_ohlcv_from_stock_day(
 ) -> tuple:
     """STOCK_DAY 逐檔月表補值 —— 全函式唯一的逐檔 HTTP，最後手段。
 
-    抓不到（DataUnavailableError）時原樣回傳 current，不讓例外往外擴散：
+    抓不到（DataUnavailableError）時印出原因並原樣回傳 current，不讓例外往外擴散：
     這是 fallback 鏈的最後一環，缺值由呼叫端寫成 NULL。
     """
     month_start = date.replace(day=1)
@@ -1490,7 +1490,8 @@ def _fill_ohlcv_from_stock_day(
         try:
             twse_day = fetch_twse_stock_day(session, symbol, date)
             twse_month_cache[cache_key] = twse_day
-        except DataUnavailableError:
+        except DataUnavailableError as exc:
+            print(f"    {symbol} STOCK_DAY 月表取得失敗：{exc}")
             return current
 
     # find_twse_ohlcv 的順序是 (open, high, low, close, volume)，

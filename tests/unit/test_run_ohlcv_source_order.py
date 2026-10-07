@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from tw_stock_rawdata import run
+from tw_stock_rawdata.sources import DataUnavailableError
 
 DATE = dt.date(2026, 8, 19)
 MONTH = dt.date(2026, 8, 1)
@@ -179,3 +180,20 @@ def test_build_daily_rows_without_market_type_column(stock_day_spy) -> None:
     )
 
     assert stock_day_spy == ["2330"]
+
+
+def test_stock_day_failure_keeps_current_and_is_logged(monkeypatch, capsys) -> None:
+    """最後手段也失敗時保留原值（缺值寫 NULL），但不可靜默——要印出哪一檔、為什麼。"""
+    def _fail(session, stock_no, date):  # noqa: ANN001 - 測試替身
+        raise DataUnavailableError("很抱歉，沒有符合條件的資料!")
+
+    monkeypatch.setattr(run, "fetch_twse_stock_day", _fail)
+    result = run._fetch_ohlcv_with_fallback(
+        session=None, date=DATE, symbol="2330",
+        twse_day_all=None, twse_mi_index=None,
+        tpex_quotes=_empty_quotes(),
+        twse_month_cache={},
+        market_type="twse",
+    )
+    assert result.close is None
+    assert "2330 STOCK_DAY 月表取得失敗：很抱歉，沒有符合條件的資料!" in capsys.readouterr().out

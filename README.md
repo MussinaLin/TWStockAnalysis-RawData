@@ -279,6 +279,8 @@ TWSE 限流——而限流回應與「真的沒資料」是同一個字串，無
 `NULL` 而無人察覺。持股佔比與處置名單的訊息見各自章節；其餘逐檔來源：
 
 - 歷史單日回補（無 cache）的 MoneyDJ 融資融券：`{symbol} 融資融券取得失敗：{原因}`。
+- OHLCV fallback 鏈最後一環 `STOCK_DAY` 月表：`{symbol} STOCK_DAY 月表取得失敗：{原因}`
+  （該檔 OHLCV 缺值寫 `NULL`）。
 
 ### 休市開關（config.is_trading_day）
 
