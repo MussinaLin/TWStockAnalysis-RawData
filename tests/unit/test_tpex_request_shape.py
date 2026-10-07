@@ -31,8 +31,9 @@ STOCK_DAY = {"stat": "ok", "date": "20260801", "tables": [
 ]}
 COMPANY = [{"SecuritiesCompanyCode": "6488", "IssueShares": "100"}]
 MARGIN = [{"Date": "1150821", "SecuritiesCompanyCode": "6488"}]
+# 標題 2026-08 底由「上櫃處置有價證券資訊」改成「上櫃處置有價證券」，fixture 用現行版本。
 DISPOSITION = {"stat": "ok", "tables": [
-    {"title": "上櫃處置有價證券資訊", "fields": ["證券代號"], "data": [["6488"]]}
+    {"title": "上櫃處置有價證券", "fields": ["證券代號"], "data": [["6488"]]}
 ]}
 
 CASES = [
@@ -122,6 +123,14 @@ class TestParsingDifferences:
         ]}
         with pytest.raises(sources.DataUnavailableError, match="上櫃處置有價證券"):
             sources.fetch_tpex_disposition(_session(wrong), DATE, END)
+
+    def test_disposition_accepts_legacy_title(self) -> None:
+        """改版前的舊標題「上櫃處置有價證券資訊」也要吃——關鍵字取兩者共同子字串。"""
+        legacy = {"stat": "ok", "tables": [
+            {"title": "上櫃處置有價證券資訊", "fields": ["證券代號"], "data": [["6488"]]}
+        ]}
+        df = sources.fetch_tpex_disposition(_session(legacy), DATE, END)
+        assert df["證券代號"].tolist() == ["6488"]
 
     def test_disposition_accepts_missing_stat(self) -> None:
         payload = dict(DISPOSITION)
