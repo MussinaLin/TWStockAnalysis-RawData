@@ -2209,7 +2209,7 @@ def _fetch_holding_pct_per_symbol(
 ) -> dict[str, dict[dt.date, dict]]:
     """逐檔抓外資／法人持股佔比，組成與預取 cache 同形狀的 dict。
 
-    daily 模式不帶 cache，故此處是逐檔對 MoneyDJ 各打一次。失敗一律吞掉——
+    daily 模式不帶 cache，故此處是逐檔對 MoneyDJ 各打一次。失敗印出原因後續行——
     持股佔比不納入 _stock_sources_ok，抓不到不該讓整檔個股跳過不寫。
     失敗的個股不放進 cache（區間預取則會留一個空 dict），`_resolve_holding_pct`
     對兩者一視同仁。
@@ -2221,8 +2221,8 @@ def _fetch_holding_pct_per_symbol(
             try:
                 raw = fetch_moneydj_holding_pct(session, symbol, date, date)
                 cache[symbol] = _holding_pct_by_date(prepare_moneydj_holding_pct(raw))
-            except (DataUnavailableError, requests.RequestException):
-                pass
+            except (DataUnavailableError, requests.RequestException) as exc:
+                print(f"    {symbol} 法人持股取得失敗：{exc}")
     return cache
 
 

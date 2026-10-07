@@ -275,6 +275,13 @@ class TestHoldingPctAndDisposition:
         _run()
         assert seen == ["2330", "6488"]
 
+    def test_per_symbol_failure_is_logged(self, wiring, capsys) -> None:
+        """抓不到持股佔比仍不 gating，但不可靜默——要印出哪一檔、為什麼。"""
+        _run()  # wiring 預設 fetch_moneydj_holding_pct 一律丟 DataUnavailableError("no")
+        out = capsys.readouterr().out
+        assert "2330 法人持股取得失敗：no" in out
+        assert "6488 法人持股取得失敗：no" in out
+
     def test_disposition_prefetched_is_not_refetched(self, wiring) -> None:
         sentinel = run.DispositionData({}, frozenset())
         _run(disposition=sentinel)
