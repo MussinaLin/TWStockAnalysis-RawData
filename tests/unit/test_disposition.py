@@ -305,6 +305,35 @@ def test_fetch_disposition_one_market_failure_does_not_block_other(monkeypatch) 
     assert data.resolve(dt.date(2026, 8, 20), "2330", "twse") == (None, None)
 
 
+@pytest.mark.parametrize("failed,ok,label", [
+    ("twse", "tpex", "上市股"),
+    ("tpex", "twse", "上櫃股"),
+])
+def test_fetch_disposition_summary_names_failed_market(
+    monkeypatch, capsys, failed: str, ok: str, label: str,
+) -> None:
+    """只有一邊成功時，summary 要明講哪個市場失敗、後果是什麼。
+
+    只印成功那一邊的話，失敗會被埋在逐窗口訊息裡——TPEX 改版那次就這樣
+    連續 6 週沒被發現。
+    """
+    rows = {"twse": ([], None), "tpex": ([], None)}
+    rows[failed] = ([], DataUnavailableError("找不到表格"))
+    _patch_fetchers(monkeypatch, twse=rows["twse"], tpex=rows["tpex"])
+    run._fetch_disposition(None, DATE, DATE)
+
+    out = capsys.readouterr().out
+    assert f"處置股名單：{ok} 取得成功" in out
+    assert f"處置股名單：⚠ {failed} 取得失敗，{label}處置欄本次不寫入" in out
+
+
+def test_fetch_disposition_summary_silent_on_failure_when_both_ok(monkeypatch, capsys) -> None:
+    _patch_fetchers(monkeypatch)
+    run._fetch_disposition(None, DATE, DATE)
+
+    assert "取得失敗" not in capsys.readouterr().out
+
+
 def test_fetch_disposition_chunks_long_range_into_windows(monkeypatch) -> None:
     """長區間要切成 ≤ 6 個月的窗口分別查。
 

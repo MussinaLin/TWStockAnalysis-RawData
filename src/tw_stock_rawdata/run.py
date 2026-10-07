@@ -619,6 +619,9 @@ def _expand_disposition_frames(
                 day += dt.timedelta(days=1)
 
 
+_DISPOSITION_MARKET_LABELS = {"twse": "上市股", "tpex": "上櫃股"}
+
+
 def _print_disposition_summary(
     ok_markets: set[str],
     by_date: dict[dt.date, dict[str, int | None]],
@@ -626,7 +629,11 @@ def _print_disposition_summary(
     start: dt.date,
     end: dt.date,
 ) -> None:
-    """印出處置名單取得結果；兩市場皆失敗時明說該欄位本次不寫入。"""
+    """印出處置名單取得結果；任一市場失敗都明說是哪個市場、該欄位本次不寫入。
+
+    只有一邊失敗時不能只印成功那一邊：失敗原因只出現在逐窗口訊息裡，很容易被
+    埋掉——TPEX 表格標題改版那次，上櫃股處置欄就這樣連續 6 週全寫 NULL 沒人發現。
+    """
     if not ok_markets:
         print("處置股名單：兩市場皆取得失敗，該欄位本次不寫入（保留 DB 既有值）")
         return
@@ -637,6 +644,11 @@ def _print_disposition_summary(
         f"（每市場 {n_windows} 段查詢），"
         f"{start} ~ {end} 內 {n_days} 天 / {n_symbols} 檔標的在處置期間"
     )
+    for market in sorted(_DISPOSITION_MARKET_LABELS.keys() - ok_markets):
+        print(
+            f"處置股名單：⚠ {market} 取得失敗，{_DISPOSITION_MARKET_LABELS[market]}處置欄"
+            "本次不寫入（保留 DB 既有值，新列為 NULL）"
+        )
 
 
 def _fetch_disposition(
