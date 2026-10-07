@@ -159,7 +159,7 @@ ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS limit_down NUMERIC(12,2);
 -- 既有資料庫的線上 migration：補上後加的處置股欄（idempotent）。
 -- is_disposition：TRUE = 該交易日落在處置期間內；FALSE = 該日已成功取得該市場處置
 --   名單且此檔不在名單；NULL = 當日名單取得失敗或尚未回補（下游需容忍 NULL）。
--- disposition_match_minutes：處置期間的撮合間隔分鐘數（實測值域 5/10/20/25/45/60），
+-- disposition_match_minutes：處置期間的撮合間隔分鐘數（實測值域 2/5/10/20/25/45/60），
 --   非處置日寫 0 而非 NULL —— upsert 的 COALESCE 不以 NULL 覆寫舊值，若非處置寫 NULL，
 --   前一段處置留下的分鐘數會永遠清不掉，變成「非處置卻每 20 分鐘撮合」的矛盾列。
 ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS is_disposition            BOOLEAN;
