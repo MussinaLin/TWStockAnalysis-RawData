@@ -856,10 +856,14 @@ def fetch_tpex_disposition(
     start: dt.date,
     end: dt.date,
 ) -> pd.DataFrame:
-    """Fetch TPEX 上櫃處置有價證券資訊 for a date range.
+    """Fetch TPEX 上櫃處置有價證券 for a date range.
 
     回傳欄位：編號 / 公布日期 / 證券代號 / 證券名稱 / 累計 / 處置起訖時間 /
-    處置原因 / 處置內容 / 收盤價 / 本益比。注意「起訖」與 TWSE 的「起迄」用字不同。
+    處置原因 / 處置措施 / 處置內容 / 收盤價 / 本益比。注意「起訖」與 TWSE 的「起迄」用字不同。
+
+    表格標題 2026-08 底由「上櫃處置有價證券資訊」改成「上櫃處置有價證券」（同時新增
+    「處置措施」欄）。關鍵字取兩者共同子字串，新舊都吃；舊關鍵字曾讓 TPEX 名單整段
+    取得失敗、上櫃股處置欄全寫 NULL。
     """
     params = {
         "startDate": start.strftime("%Y/%m/%d"),
@@ -872,7 +876,7 @@ def fetch_tpex_disposition(
     if payload.get("stat") not in {None, "ok", "OK"}:
         raise DataUnavailableError(payload.get("stat") or "TPEX 處置股回傳異常")
 
-    return _extract_tpex_v2_table(payload, "上櫃處置有價證券資訊")
+    return _extract_tpex_v2_table(payload, "上櫃處置有價證券")
 
 
 _MONEYDJ_ROC_DATE_RE = re.compile(r"^\d{2,3}/\d{1,2}/\d{1,2}$")

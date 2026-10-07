@@ -120,7 +120,7 @@ class TestParsingDifferences:
         wrong = {"stat": "ok", "tables": [
             {"title": "上櫃股票", "fields": ["a"], "data": [["1"]]}
         ]}
-        with pytest.raises(sources.DataUnavailableError, match="上櫃處置有價證券資訊"):
+        with pytest.raises(sources.DataUnavailableError, match="上櫃處置有價證券"):
             sources.fetch_tpex_disposition(_session(wrong), DATE, END)
 
     def test_disposition_accepts_missing_stat(self) -> None:
