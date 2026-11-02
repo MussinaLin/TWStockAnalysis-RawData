@@ -36,6 +36,7 @@ tw-stock-rawdata --backfill-stocks 2330,2317 --backfill-start ... --backfill-end
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force  # 強制覆蓋
 tw-stock-rawdata --backfill-disposition --backfill-start ... --backfill-end ...  # 只回補處置股註記
 tw-stock-rawdata --backfill-trust-holding --backfill-start ... --backfill-end ...  # 只回補投信持股比例
+tw-stock-rawdata --backfill-margin --backfill-start ... --backfill-end ...  # 只回補融資融券（交易所逐日整批）
 tw-stock-rawdata --update-shares      # 只刷新 stocks.issued_shares
 
 # 測試

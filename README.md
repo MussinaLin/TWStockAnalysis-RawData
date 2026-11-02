@@ -64,6 +64,9 @@ tw-stock-rawdata --backfill-disposition --backfill-stocks 2330,2317 \
 # 只回補投信持股比例（trust_holding_pct），可選 --backfill-stocks 限定股票
 tw-stock-rawdata --backfill-trust-holding --backfill-start 2024-01-02 --backfill-end 2026-09-14
 
+# 只回補 9 個融資融券欄位（來源：交易所逐日整批），可選 --backfill-stocks 限定股票
+tw-stock-rawdata --backfill-margin --backfill-start 2026-04-07 --backfill-end 2026-05-28
+
 # 強制覆蓋既有資料
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force
 
@@ -189,6 +192,24 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
 `--backfill-stocks` 限定股票；某檔 MoneyDJ 失敗時繼續下一檔，收尾列出失敗代號供重跑。
 結果冪等，可重複執行，不需 `--force`。之後的新資料不必再回補：daily、一般區間回補、
 `--backfill-stocks` 都會寫這一欄。
+
+### 只回補融資融券（--backfill-margin）
+
+只更新 `stock_daily_raw` 已存在列的 9 個融資融券欄位（`margin_buy`／`margin_sell`／
+`margin_balance`／`margin_change`／`short_sell`／`short_buy`／`short_balance`／
+`short_change`／`short_margin_ratio`），其他欄位一律不動、不新增列。
+
+- **來源是交易所逐日整批**：TWSE `MI_MARGN`（上市）與 TPEX 融資融券 V2（上櫃），每個交易日
+  2 個請求；**不**走 MoneyDJ。2026-10 以一般區間回補（融資融券取自 MoneyDJ）重寫歷史後，
+  上市股 2026-04-07～05-28 的融資融券錯開一個交易日（存成前一日的值），且同一份程式在
+  DEV／PROD 跑出的結果不一致；交易所整批附資料日期，可逐日驗證。
+- **資料日期必須等於請求日期**，否則該市場當日整批不寫（TWSE 尚未發布時會回前一日的
+  資料）。回傳日期為空也不接受。
+- 對象是該日 DB 已有列的個股（含現已停用者），可用 `--backfill-stocks` 限縮；不在交易所
+  表內的個股（例如不開放信用交易）不動。來源某欄為 `NULL` 時保留舊值。
+- 券資比用與 daily 相同的公式重算（`short_balance / margin_balance`）。
+- DB 當日無列（週末、休市）不發請求。某日某市場失敗不中斷，收尾列出未回補的日期與市場。
+  結果冪等，可重複執行。
 
 ### 回補特定股票（--backfill-stocks）
 

@@ -30,6 +30,7 @@ from .db_utils import (
     update_disposition_batch,
     update_prev_day_margin_batch,
     update_price_limits_batch,
+    update_margin_batch,
     update_trust_holding_batch,
     upsert_daily_raw,
     upsert_holder_percent,
@@ -358,6 +359,7 @@ def _is_daily_mode(args: argparse.Namespace) -> bool:
         or args.backfill_limits
         or args.backfill_disposition
         or args.backfill_trust_holding
+        or args.backfill_margin
         or args.update_shares
         or args.dahu
     )
@@ -404,6 +406,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backfill-trust-holding", action="store_true",
         help="只回補 trust_holding_pct（投信持股比例）"
+             "（需搭配 --backfill-start / --backfill-end，可選 --backfill-stocks）",
+    )
+    parser.add_argument(
+        "--backfill-margin", action="store_true",
+        help="只回補 9 個融資融券欄位，來源為交易所逐日整批（TWSE MI_MARGN／TPEX V2）"
              "（需搭配 --backfill-start / --backfill-end，可選 --backfill-stocks）",
     )
     parser.add_argument(
@@ -918,6 +925,102 @@ def _backfill_trust_holding_command(
             f"⚠ MoneyDJ 取得失敗 {len(failed)} 檔，未回補（可用 --backfill-stocks 重跑）："
             f"{','.join(failed)}"
         )
+
+
+def _fetch_margin_table_for_date(
+    session: requests.Session,
+    date: dt.date,
+    fetch,
+    prepare,
+    label: str,
+) -> tuple[pd.DataFrame | None, str | None]:
+    """取某市場某日的整批融資融券；回傳 (prepared table, 失敗原因)。
+
+    資料日期必須**等於**請求日期：TWSE 尚未發布時會回前一日的資料，寫下去等於把
+    D-1 的值標成 D。回傳日期為 None（TPEX V2 偶有）也不接受——daily 模式容忍是因為
+    隔天有 MoneyDJ 修正，歷史回補沒有第二道防線。
+    """
+    try:
+        raw, data_date = fetch(session, date)
+    except (DataUnavailableError, requests.RequestException) as exc:
+        return None, f"{label} 取得失敗：{exc}"
+    if data_date != date:
+        return None, f"{label} 資料日期 {data_date} 不等於 {date}，不寫"
+    try:
+        return prepare(raw), None
+    except DataUnavailableError as exc:
+        return None, f"{label} 解析失敗：{exc}"
+
+
+def _backfill_margin_command(
+    session: requests.Session,
+    config: AppConfig,
+    args: argparse.Namespace,
+) -> None:
+    """--backfill-margin：只回補 stock_daily_raw 的 9 個融資融券欄位。
+
+    逐日向交易所取整批（TWSE MI_MARGN、TPEX 融資融券 V2，每天 2 個請求），以
+    `_get_margin_data` 取值（上市優先、不跨市場補洞），券資比用與 daily 相同的
+    `_short_margin_ratio` 重算。不用 MoneyDJ：2026-10 的整段回補經 MoneyDJ 寫入的
+    融資融券在 2026-04-07～05-28 錯開一個交易日（DEV／PROD 結果還不一致），交易所整批
+    附資料日期、可逐日驗證。
+
+    對象是該日 DB 已有列的個股（含現已停用者），可用 --backfill-stocks 限縮；只
+    UPDATE 已存在的列、只寫這 9 欄，來源 NULL 不覆寫（見 update_margin_batch）。
+    DB 該日無列（週末、休市）不打任何請求。
+    """
+    if args.date:
+        print("警告：--backfill-margin 已啟用，--date 將被忽略")
+
+    if not args.backfill_start or not args.backfill_end:
+        print("錯誤：--backfill-margin 需搭配 --backfill-start 和 --backfill-end")
+        return
+
+    only_symbols: set[str] | None = None
+    if args.backfill_stocks:
+        only_symbols = {s.strip() for s in args.backfill_stocks.split(",") if s.strip()}
+        if not only_symbols:
+            print("錯誤：--backfill-stocks 未指定任何股票代號")
+            return
+
+    dates = _build_date_range(
+        _parse_date(args.backfill_start), _parse_date(args.backfill_end)
+    )
+    print(f"回補融資融券 {dates[0]} ~ {dates[-1]}（交易所逐日整批）")
+
+    total = 0
+    problems: list[str] = []
+    for date in dates:
+        symbols = load_symbols_for_date(config.database_url, date)
+        if only_symbols is not None:
+            symbols &= only_symbols
+        if not symbols:
+            continue
+
+        twse, twse_err = _fetch_margin_table_for_date(
+            session, date, fetch_twse_margin, prepare_twse_margin, "TWSE")
+        tpex, tpex_err = _fetch_margin_table_for_date(
+            session, date, fetch_tpex_margin_v2, prepare_tpex_margin_v2, "TPEX")
+        for err in (twse_err, tpex_err):
+            if err:
+                print(f"  {date} {err}")
+                problems.append(f"{date} {err.split('：')[0].split(' ')[0]}")
+
+        updates = []
+        for symbol in sorted(symbols):
+            data = _get_margin_data(symbol, twse, tpex)
+            if all(v is None for v in data.values()):
+                continue   # 不在任一來源表內（例如不開放信用交易），不動
+            data["short_margin_ratio"] = _short_margin_ratio(
+                data.get("margin_balance"), data.get("short_balance"))
+            updates.append((symbol, date, data))
+        n_updated = update_margin_batch(config.database_url, updates)
+        total += n_updated
+        print(f"  {date} 更新 {n_updated} 列（DB 有 {len(symbols)} 檔）")
+
+    print(f"融資融券回補完成，共更新 {total} 列")
+    if problems:
+        print(f"⚠ 未回補的日期／市場（可縮小範圍重跑）：{'、'.join(problems)}")
 
 
 class RowSourceProvider(Protocol):
@@ -2695,6 +2798,11 @@ def _main_inner(
     # --backfill-trust-holding mode：只回補投信持股比例一欄
     if args.backfill_trust_holding:
         _backfill_trust_holding_command(session, config, args)
+        return
+
+    # --backfill-margin mode：只回補 9 個融資融券欄位
+    if args.backfill_margin:
+        _backfill_margin_command(session, config, args)
         return
 
     # --backfill-stocks mode
