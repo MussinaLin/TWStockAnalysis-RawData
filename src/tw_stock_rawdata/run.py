@@ -2473,22 +2473,6 @@ _PREV_MARGIN_FIELDS = [
 ]
 
 
-def _expected_prev_trade_date(current_date: dt.date) -> dt.date:
-    """日曆上的 D-1，只處理週末（不處理 holiday）。
-
-    - 週一 → 上週五（-3）
-    - 週日 → 上週五（-2，防呆）
-    - 週六 → 週五（-1，防呆）
-    - 其他 → -1
-    """
-    weekday = current_date.weekday()
-    if weekday == 0:
-        return current_date - dt.timedelta(days=3)
-    if weekday == 6:
-        return current_date - dt.timedelta(days=2)
-    return current_date - dt.timedelta(days=1)
-
-
 def _refresh_prev_day_margin(
     session: requests.Session,
     holdings: pd.DataFrame,
@@ -2498,12 +2482,18 @@ def _refresh_prev_day_margin(
     """用 MoneyDJ 修正 stock_daily_raw 上 D-1 的融資融券欄位。
 
     TWSE/TPEX 個股當日 OpenAPI 拿到的 margin/short 為速報版，隔天會被修正；
-    MoneyDJ 提供修正後的最終版本。本 function 在 daily 模式下執行，
-    依 holdings 對每支股票打 MoneyDJ 拿 D-1 資料並覆寫。
+    MoneyDJ 提供修正後的最終版本（餘額即交易所隔日公布的前日餘額）。本 function 在
+    daily 模式下執行，依 holdings 對每支股票打 MoneyDJ 拿 D-1 資料並覆寫。
+
+    D-1 取 DB 兩表共識的前一交易日，連假後 D-1 在好幾個日曆日之前也照常修正。
+    DB 是否缺交易日（部分回補，例如 DB 只到 05-13 卻跑 --date 05-20）由 MoneyDJ
+    回傳的交易日判斷：查詢區間延伸到 D 的前一天，任一檔在 D-1 與 D 之間有資料就是
+    DB 缺日，整批不寫。缺日是全市場的，通常第一檔就看得出來，只多花 1 次請求。
 
     跳過條件（任一）：
-    - DB 找不到 D-1 row（completely empty / brand new install）
     - holdings 為空
+    - DB 找不到 D-1 共識交易日（completely empty / brand new install / 兩表不一致）
+    - MoneyDJ 顯示 D-1 與 D 之間還有交易日（DB 缺日）
     """
     if holdings.empty:
         return
@@ -2516,32 +2506,34 @@ def _refresh_prev_day_margin(
         )
         return
 
-    expected_prev = _expected_prev_trade_date(current_date)
-    if prev_date != expected_prev:
-        print(
-            f"  DB D-1 ({prev_date}) 不等於 {current_date} 的日曆 D-1 ({expected_prev})，"
-            f"略過融資融券修正（可能是部分回補狀態）"
-        )
-        return
-
     total = len(holdings)
     print(f"  開始修正 D-1 ({prev_date}) 融資融券資料（{total} 檔）...")
 
     # MoneyDJ 融資融券頁面對 c==d 的單日查詢只回 summary row、不含當日資料；
-    # 必須用區間查詢再 filter 出 prev_date。
+    # 必須用區間查詢再 filter 出 prev_date。區間尾端是 D 的前一天而非 prev_date，
+    # 用來看出 DB 缺日；週二～週五兩者相同，週一與連假後只多涵蓋休市日（沒有資料）。
     fetch_start = prev_date - dt.timedelta(days=10)
+    fetch_end = current_date - dt.timedelta(days=1)
 
     updates: list[tuple[str, dt.date, dict]] = []
     n_failed = 0
     for idx, item in holdings.iterrows():
         symbol = str(item["symbol"]).strip()
         try:
-            raw = fetch_moneydj_margin(session, symbol, fetch_start, prev_date)
+            raw = fetch_moneydj_margin(session, symbol, fetch_start, fetch_end)
             df = prepare_moneydj_margin(raw)
         except (DataUnavailableError, requests.RequestException) as exc:
             n_failed += 1
             print(f"    {idx + 1}/{total} {symbol} MoneyDJ 取得失敗：{exc}")
             continue
+
+        missing = df.loc[(df["date"] > prev_date) & (df["date"] < current_date), "date"]
+        if not missing.empty:
+            print(
+                f"  MoneyDJ（{symbol}）顯示 {min(missing)} 有交易，但 DB 的 D-1 是 {prev_date}，"
+                f"略過融資融券修正（DB 缺交易日，可能是部分回補狀態）"
+            )
+            return
 
         row = df.loc[df["date"] == prev_date]
         if row.empty:

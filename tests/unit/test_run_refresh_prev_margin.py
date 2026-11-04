@@ -1,4 +1,4 @@
-"""Tests for _expected_prev_trade_date and _refresh_prev_day_margin guard."""
+"""Tests for _refresh_prev_day_margin：D-1 的判定（連假、DB 缺日）與 MoneyDJ 查詢區間。"""
 
 from __future__ import annotations
 
@@ -6,25 +6,8 @@ import datetime as dt
 from types import SimpleNamespace
 
 import pandas as pd
-import pytest
 
 from tw_stock_rawdata import run
-
-
-@pytest.mark.parametrize(
-    ("current", "expected"),
-    [
-        (dt.date(2026, 5, 18), dt.date(2026, 5, 15)),  # Mon → previous Fri
-        (dt.date(2026, 5, 19), dt.date(2026, 5, 18)),  # Tue → Mon
-        (dt.date(2026, 5, 20), dt.date(2026, 5, 19)),  # Wed → Tue
-        (dt.date(2026, 5, 21), dt.date(2026, 5, 20)),  # Thu → Wed
-        (dt.date(2026, 5, 22), dt.date(2026, 5, 21)),  # Fri → Thu
-        (dt.date(2026, 5, 23), dt.date(2026, 5, 22)),  # Sat → Fri (defensive)
-        (dt.date(2026, 5, 24), dt.date(2026, 5, 22)),  # Sun → Fri (defensive)
-    ],
-)
-def test_expected_prev_trade_date(current: dt.date, expected: dt.date) -> None:
-    assert run._expected_prev_trade_date(current) == expected
 
 
 def _config() -> SimpleNamespace:
@@ -35,25 +18,63 @@ def _holdings(symbols: list[str]) -> pd.DataFrame:
     return pd.DataFrame([{"symbol": s, "name": ""} for s in symbols])
 
 
-def test_refresh_prev_day_margin_skips_when_db_prev_mismatches_calendar(monkeypatch, capsys):
-    """User's bug: --date 2026-05-20 with DB only up to 2026-05-13 must skip."""
-    current = dt.date(2026, 5, 20)
-    db_prev = dt.date(2026, 5, 13)
+def _mdj(*days: dt.date) -> pd.DataFrame:
+    """prepare_moneydj_margin 的輸出：每個交易日一列，margin_balance 以日序編號。"""
+    rows = [{"date": d, **{c: i for c in run._PREV_MARGIN_FIELDS}}
+            for i, d in enumerate(days, 1)]
+    return pd.DataFrame(rows, columns=["date", *run._PREV_MARGIN_FIELDS])
 
-    monkeypatch.setattr(
-        run, "find_consensus_prev_trade_date", lambda _url, _d: db_prev
-    )
 
-    fetch_calls: list[tuple] = []
-    monkeypatch.setattr(
-        run, "fetch_moneydj_margin",
-        lambda *a, **kw: fetch_calls.append((a, kw)) or pd.DataFrame(),
-    )
+def _fake_moneydj(monkeypatch, frames: dict[str, pd.DataFrame]):
+    """fetch 回傳代號、prepare 依代號回該檔的資料；回傳 (fetch 紀錄, update 紀錄)。"""
+    fetch_calls: list[tuple[str, dt.date, dt.date]] = []
     update_calls: list[list] = []
+
+    def fake_fetch(_session, symbol, start, end):
+        fetch_calls.append((symbol, start, end))
+        return symbol
+
+    monkeypatch.setattr(run, "fetch_moneydj_margin", fake_fetch)
+    monkeypatch.setattr(run, "prepare_moneydj_margin", lambda symbol: frames[symbol])
     monkeypatch.setattr(
         run, "update_prev_day_margin_batch",
-        lambda _url, updates: update_calls.append(updates) or 0,
+        lambda _url, updates: update_calls.append(updates) or len(updates),
     )
+    return fetch_calls, update_calls
+
+
+def test_refresh_prev_day_margin_corrects_d1_after_holiday(monkeypatch):
+    """春節後第一個交易日：D-1 是 9 個日曆日前的 01-22，仍要修正（舊版會誤判跳過）。"""
+    current = dt.date(2025, 2, 3)
+    db_prev = dt.date(2025, 1, 22)
+    monkeypatch.setattr(run, "find_consensus_prev_trade_date", lambda _url, _d: db_prev)
+    fetch_calls, update_calls = _fake_moneydj(monkeypatch, {
+        "2330": _mdj(dt.date(2025, 1, 20), dt.date(2025, 1, 21), db_prev),
+    })
+
+    run._refresh_prev_day_margin(
+        session=object(),
+        holdings=_holdings(["2330"]),
+        current_date=current,
+        config=_config(),
+    )
+
+    assert [(s, end) for s, _start, end in fetch_calls] == [("2330", dt.date(2025, 2, 2))]
+    assert len(update_calls) == 1
+    [(symbol, trade_date, data)] = update_calls[0]
+    assert (symbol, trade_date) == ("2330", db_prev)
+    assert data["margin_balance"] == 3
+
+
+def test_refresh_prev_day_margin_skips_when_db_missing_trade_days(monkeypatch, capsys):
+    """部分回補：--date 2026-05-20 但 DB 只到 05-13；MoneyDJ 顯示 05-14 有交易 → 整批不寫。"""
+    current = dt.date(2026, 5, 20)
+    db_prev = dt.date(2026, 5, 13)
+    monkeypatch.setattr(run, "find_consensus_prev_trade_date", lambda _url, _d: db_prev)
+    fetch_calls, update_calls = _fake_moneydj(monkeypatch, {
+        "2330": _mdj(db_prev, dt.date(2026, 5, 14), dt.date(2026, 5, 15)),
+        "2317": _mdj(db_prev, dt.date(2026, 5, 14), dt.date(2026, 5, 15)),
+    })
 
     run._refresh_prev_day_margin(
         session=object(),
@@ -65,13 +86,36 @@ def test_refresh_prev_day_margin_skips_when_db_prev_mismatches_calendar(monkeypa
     out = capsys.readouterr().out
     assert "略過融資融券修正" in out
     assert "2026-05-13" in out
-    assert "2026-05-19" in out  # expected D-1
-    assert fetch_calls == []  # no MoneyDJ requests
+    assert "2026-05-14" in out  # DB 缺的交易日
+    assert [s for s, _start, _end in fetch_calls] == ["2330"]  # 第一檔就發現，只多 1 次請求
     assert update_calls == []  # no DB writes
 
 
-def test_refresh_prev_day_margin_proceeds_when_db_prev_matches_calendar(monkeypatch):
-    """Normal daily run: DB prev == calendar D-1 → MoneyDJ correction runs."""
+def test_refresh_prev_day_margin_gap_found_later_discards_collected_updates(monkeypatch):
+    """前幾檔沒資料或停牌看不出缺日，後面某檔才發現：已取得的也不寫。"""
+    current = dt.date(2026, 5, 20)
+    db_prev = dt.date(2026, 5, 13)
+    monkeypatch.setattr(run, "find_consensus_prev_trade_date", lambda _url, _d: db_prev)
+    fetch_calls, update_calls = _fake_moneydj(monkeypatch, {
+        "1101": _mdj(dt.date(2026, 5, 12), db_prev),  # 05-14 起停牌
+        "9999": _mdj(),  # 區間內完全沒有資料
+        "2330": _mdj(db_prev, dt.date(2026, 5, 14)),
+        "2317": _mdj(db_prev, dt.date(2026, 5, 14)),
+    })
+
+    run._refresh_prev_day_margin(
+        session=object(),
+        holdings=_holdings(["1101", "9999", "2330", "2317"]),
+        current_date=current,
+        config=_config(),
+    )
+
+    assert [s for s, _start, _end in fetch_calls] == ["1101", "9999", "2330"]
+    assert update_calls == []
+
+
+def test_refresh_prev_day_margin_proceeds_on_normal_day(monkeypatch):
+    """Normal daily run: DB prev == previous weekday → MoneyDJ correction runs."""
     current = dt.date(2026, 5, 20)
     db_prev = dt.date(2026, 5, 19)
 
