@@ -425,7 +425,9 @@ def prepare_twse_margin(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare TWSE margin trading data into standard format.
 
     Columns: symbol, margin_buy, margin_sell, margin_balance, margin_change,
-             short_sell, short_buy, short_balance, short_change
+             short_sell, short_buy, short_balance, short_change,
+             prev_margin_balance, prev_short_balance（交易所公布的前日餘額，
+             --backfill-margin 用來校正 D-1 的餘額；daily 不讀）
     Units: lots (張) — API already returns lots since ~2026-03
     """
     cols = _find_columns(df, {
@@ -434,10 +436,12 @@ def prepare_twse_margin(df: pd.DataFrame) -> pd.DataFrame:
         "margin_sell": [["融資賣出"]],
         "margin_cash_repay": [["融資現金償還"]],
         "margin_balance": [["融資今日餘額"], ["融資餘額"]],
+        "prev_margin_balance": [["融資前日餘額"]],
         "short_sell": [["融券賣出"]],
         "short_buy": [["融券買進"]],
         "short_stock_repay": [["融券現券償還"]],
         "short_balance": [["融券今日餘額"], ["融券餘額"]],
+        "prev_short_balance": [["融券前日餘額"]],
     })
 
     symbol_col = cols.get("symbol")
@@ -453,6 +457,8 @@ def prepare_twse_margin(df: pd.DataFrame) -> pd.DataFrame:
     result["short_sell"] = _int_col_or_nulls(df, cols, "short_sell")
     result["short_buy"] = _int_col_or_nulls(df, cols, "short_buy")
     result["short_balance"] = _int_col_or_nulls(df, cols, "short_balance")
+    result["prev_margin_balance"] = _int_col_or_nulls(df, cols, "prev_margin_balance")
+    result["prev_short_balance"] = _int_col_or_nulls(df, cols, "prev_short_balance")
 
     # Calculate margin_change: buy - sell - cash_repay
     margin_buy = _int_col_or_nulls(df, cols, "margin_buy")
@@ -567,7 +573,9 @@ def prepare_tpex_margin_v2(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare TPEX margin V2 data (Chinese column names) into standard format.
 
     Columns: symbol, margin_buy, margin_sell, margin_balance, margin_change,
-             short_sell, short_buy, short_balance, short_change, short_margin_ratio
+             short_sell, short_buy, short_balance, short_change, short_margin_ratio,
+             prev_margin_balance, prev_short_balance（前資／前券餘額，缺欄為 NA；
+             --backfill-margin 用來校正 D-1 的餘額；daily 不讀）
     Units: lots (張). margin_change/short_change are computed from balance diffs.
     """
     cols = _find_columns(df, {
@@ -637,6 +645,9 @@ def prepare_tpex_margin_v2(df: pd.DataFrame) -> pd.DataFrame:
     sb = result["short_balance"].astype(float)
     ratio = sb / mb
     result["short_margin_ratio"] = ratio.where(mb != 0, other=None)
+
+    for prev_col in ("prev_margin_balance", "prev_short_balance"):
+        result[prev_col] = temp[prev_col].map(_clean_int) if prev_col in temp.columns else None
 
     return result
 

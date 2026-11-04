@@ -439,6 +439,55 @@ def update_trust_holding_batch(
     return n_updated
 
 
+def update_margin_batch(
+    database_url: str,
+    updates: list[tuple[str, dt.date, dict]],
+) -> int:
+    """批次覆寫 stock_daily_raw 的 9 個融資融券欄位（--backfill-margin 用）。
+
+    只 UPDATE 已存在的 row，不 INSERT：理由同 update_trust_holding_batch —— 回補只有
+    這幾欄有值，走 upsert 會 INSERT 出一批其餘欄位全 NULL 的半套 row。
+    新值為 NULL 的欄位保留舊值（COALESCE），與 upsert_daily_raw 的不變量一致：
+    來源某欄解析失敗不可把已寫好的資料蓋成 NULL。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        updates: list of (symbol, trade_date, data_dict)，data_dict 的鍵同
+                 `_PREV_MARGIN_COLS`（缺鍵視為 NULL）。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計（不存在的 (symbol, trade_date) 不算）。
+    """
+    if not updates:
+        return 0
+
+    casts = ", ".join(
+        "%s::numeric" if c == "short_margin_ratio" else "%s::bigint"
+        for c in _PREV_MARGIN_COLS
+    )
+    set_clause = ", ".join(f"{c} = COALESCE(v.{c}, t.{c})" for c in _PREV_MARGIN_COLS)
+    n_updated = 0
+    with _connect(database_url) as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(updates), _BATCH_UPDATE_CHUNK):
+                chunk = updates[start:start + _BATCH_UPDATE_CHUNK]
+                values = ", ".join([f"(%s::varchar, %s::date, {casts})"] * len(chunk))
+                sql = (
+                    f"UPDATE stock_daily_raw AS t SET {set_clause}"
+                    f" FROM (VALUES {values})"
+                    f" AS v(symbol, trade_date, {', '.join(_PREV_MARGIN_COLS)})"
+                    " WHERE t.symbol = v.symbol AND t.trade_date = v.trade_date"
+                )
+                params: list = []
+                for symbol, trade_date, data in chunk:
+                    params.extend([symbol, trade_date])
+                    params.extend(_safe(data.get(c)) for c in _PREV_MARGIN_COLS)
+                cur.execute(sql, params)
+                n_updated += cur.rowcount
+        conn.commit()
+    return n_updated
+
+
 def load_symbols_for_date(database_url: str, trade_date: dt.date) -> set[str]:
     """回傳該交易日在 stock_daily_raw 已存在的 symbol 集合。
 
