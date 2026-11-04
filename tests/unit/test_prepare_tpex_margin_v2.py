@@ -63,6 +63,19 @@ class TestAmbiguousColumnResolution:
         assert out.iloc[0]["margin_change"] == 50
 
 
+class TestPrevBalances:
+    def test_exposes_prev_balances(self) -> None:
+        """前資／前券餘額是 --backfill-margin 校正 D-1 餘額的依據。"""
+        out = prepare_tpex_margin_v2(_df())
+        assert out.iloc[0]["prev_margin_balance"] == 900
+        assert out.iloc[0]["prev_short_balance"] == 180
+
+    def test_missing_prev_column_yields_na(self) -> None:
+        out = prepare_tpex_margin_v2(_df(**{"前資餘額(張)": None}))
+        assert pd.isna(out.iloc[0]["prev_margin_balance"])
+        assert out.iloc[0]["prev_short_balance"] == 180
+
+
 class TestFallbackChangeComputation:
     def test_margin_change_falls_back_to_buy_sell_repay(self) -> None:
         """缺前資餘額時改用 買 − 賣 − 現償。"""

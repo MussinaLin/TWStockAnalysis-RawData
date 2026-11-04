@@ -410,7 +410,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backfill-margin", action="store_true",
-        help="只回補 9 個融資融券欄位，來源為交易所逐日整批（TWSE MI_MARGN／TPEX V2）"
+        help="只回補 9 個融資融券欄位，來源為交易所逐日整批（TWSE MI_MARGN／TPEX V2），"
+             "餘額以隔日公布的前日餘額為準"
              "（需搭配 --backfill-start / --backfill-end，可選 --backfill-stocks）",
     )
     parser.add_argument(
@@ -952,6 +953,157 @@ def _fetch_margin_table_for_date(
         return None, f"{label} 解析失敗：{exc}"
 
 
+# 找區間後的下一個交易日最多往後看幾個日曆天（春節連假約 9 天）
+_NEXT_TRADE_DAY_SCAN_DAYS = 20
+
+
+class _MarginDay(NamedTuple):
+    """--backfill-margin 抓到的某一個交易日：兩市場整批表與要寫入的個股。"""
+
+    date: dt.date
+    twse: pd.DataFrame | None
+    tpex: pd.DataFrame | None
+    symbols: set[str]
+    n_on_db: int
+
+
+def _fetch_margin_tables(
+    session: requests.Session,
+    date: dt.date,
+    problems: list[str] | None,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """取某日上市、上櫃兩張整批表（失敗的為 None）。
+
+    problems 為 None 表示這天在區間外、只用來讀前日餘額：失敗照印，但不列入未回補。
+    """
+    tables = []
+    for fetch, prepare, label in (
+        (fetch_twse_margin, prepare_twse_margin, "TWSE"),
+        (fetch_tpex_margin_v2, prepare_tpex_margin_v2, "TPEX"),
+    ):
+        table, err = _fetch_margin_table_for_date(session, date, fetch, prepare, label)
+        if err:
+            if problems is None:
+                print(f"  {date}（只讀前日餘額）{err}")
+            else:
+                print(f"  {date} {err}")
+                problems.append(f"{date} {err.split('：')[0].split(' ')[0]}")
+        tables.append(table)
+    return tables[0], tables[1]
+
+
+def _fetch_next_margin_day(
+    session: requests.Session,
+    config: AppConfig,
+    after: dt.date,
+) -> _MarginDay | None:
+    """DB 在 after 之後的下一個交易日（只讀前日餘額、不寫）；找不到回 None。"""
+    for offset in range(1, _NEXT_TRADE_DAY_SCAN_DAYS + 1):
+        date = after + dt.timedelta(days=offset)
+        on_db = load_symbols_for_date(config.database_url, date)
+        if on_db:
+            twse, tpex = _fetch_margin_tables(session, date, None)
+            return _MarginDay(date, twse, tpex, set(), len(on_db))
+    return None
+
+
+def _opt_int(value) -> int | None:
+    return None if value is None or pd.isna(value) else int(value)
+
+
+def _margin_prev_balances(
+    symbol: str,
+    twse: pd.DataFrame | None,
+    tpex: pd.DataFrame | None,
+) -> tuple[str, int | None, int | None] | None:
+    """該檔在整批表上的 (市場, 融資前日餘額, 融券前日餘額)；上市優先，同 `_get_margin_data`。"""
+    for market, df in (("TWSE", twse), ("TPEX", tpex)):
+        if df is None or df.empty:
+            continue
+        row = df.loc[df["symbol"] == symbol]
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        return (market, _opt_int(r.get("prev_margin_balance")),
+                _opt_int(r.get("prev_short_balance")))
+    return None
+
+
+def _settle_margin_balances(
+    data: dict[str, int | float | None],
+    today_prev: tuple[int | None, int | None],
+    next_prev: tuple[int | None, int | None],
+) -> dict[str, int | float | None]:
+    """以 D+1 公布的前日餘額為 D 的餘額（融資、融券各自處理）。
+
+    交易所 D+1 的「前日餘額」有時不等於 D 的「今日餘額」（連假前後、事後調整），以前日
+    餘額為準——與大盤 `correct_prev_margin_balance`、daily `_refresh_prev_day_margin`
+    同一慣例。增減改成「D 餘額 − D-1 餘額」，D-1 餘額取 D 表上的前日餘額：同一輪回補裡
+    D-1 也校正成這個值，所以區間內增減與餘額差恆一致。D 表缺前日餘額時，改以交易所
+    當日增減加上餘額的校正量。
+
+    today_prev / next_prev：D 表、D+1 表上的 (融資, 融券) 前日餘額；next 為 None 的那一項不動。
+    """
+    out = dict(data)
+    for i, (bal, chg) in enumerate(
+        (("margin_balance", "margin_change"), ("short_balance", "short_change"))
+    ):
+        settled = next_prev[i]
+        if settled is None:
+            continue
+        if today_prev[i] is not None:
+            out[chg] = settled - today_prev[i]
+        elif data.get(chg) is not None and data.get(bal) is not None:
+            out[chg] = data[chg] + (settled - data[bal])
+        out[bal] = settled
+    return out
+
+
+def _settle_and_write_margin_day(
+    config: AppConfig,
+    day: _MarginDay,
+    next_day: _MarginDay | None,
+    unsettled: list[str],
+) -> int:
+    """寫入 day 的融資融券，餘額以 next_day 公布的前日餘額校正；回傳更新列數。
+
+    next_day 必須緊接在 day 之後：兩表共識的前一交易日（`find_consensus_prev_trade_date`，
+    與大盤校正同一道檢查）不是 day 就不校正——DB 缺日時隔日的「前日」指的是別天。
+    同一檔兩天須在同一市場。不校正的保留交易所當日值，並列入 unsettled。
+    """
+    next_tables: tuple[pd.DataFrame | None, pd.DataFrame | None] | None = None
+    if next_day is None:
+        unsettled.append(f"{day.date}（無下一個交易日）")
+    elif find_consensus_prev_trade_date(config.database_url, next_day.date) != day.date:
+        unsettled.append(f"{day.date}（與 {next_day.date} 不相鄰）")
+    else:
+        next_tables = (next_day.twse, next_day.tpex)
+        for label, today_df, next_df in (
+            ("TWSE", day.twse, next_day.twse), ("TPEX", day.tpex, next_day.tpex),
+        ):
+            if today_df is not None and not today_df.empty and next_df is None:
+                unsettled.append(f"{day.date} {label}（{next_day.date} 取得失敗）")
+
+    updates = []
+    n_settled = 0
+    for symbol in sorted(day.symbols):
+        data = _get_margin_data(symbol, day.twse, day.tpex)
+        if all(v is None for v in data.values()):
+            continue   # 不在任一來源表內（例如不開放信用交易），不動
+        today = _margin_prev_balances(symbol, day.twse, day.tpex)
+        nxt = _margin_prev_balances(symbol, *next_tables) if next_tables else None
+        if today is not None and nxt is not None and nxt[0] == today[0]:
+            data = _settle_margin_balances(data, today[1:], nxt[1:])
+            n_settled += 1
+        data["short_margin_ratio"] = _short_margin_ratio(
+            data.get("margin_balance"), data.get("short_balance"))
+        updates.append((symbol, day.date, data))
+    n_updated = update_margin_batch(config.database_url, updates)
+    print(f"  {day.date} 更新 {n_updated} 列（DB 有 {day.n_on_db} 檔，"
+          f"以隔日前日餘額校正 {n_settled} 檔）")
+    return n_updated
+
+
 def _backfill_margin_command(
     session: requests.Session,
     config: AppConfig,
@@ -964,6 +1116,9 @@ def _backfill_margin_command(
     `_short_margin_ratio` 重算。不用 MoneyDJ：2026-10 的整段回補經 MoneyDJ 寫入的
     融資融券在 2026-04-07～05-28 錯開一個交易日（DEV／PROD 結果還不一致），交易所整批
     附資料日期、可逐日驗證。
+
+    D 的餘額以 D+1 公布的「前日餘額」為準（見 `_settle_margin_balances`），所以 D 要等
+    抓到下一個交易日才寫；區間最後一天會多抓 DB 的下一個交易日（只讀、不寫）。
 
     對象是該日 DB 已有列的個股（含現已停用者），可用 --backfill-stocks 限縮；只
     UPDATE 已存在的列、只寫這 9 欄，來源 NULL 不覆寫（見 update_margin_batch）。
@@ -990,35 +1145,29 @@ def _backfill_margin_command(
 
     total = 0
     problems: list[str] = []
+    unsettled: list[str] = []
+    pending: _MarginDay | None = None   # 已抓到、等下一個交易日的前日餘額才寫的那天
     for date in dates:
-        symbols = load_symbols_for_date(config.database_url, date)
-        if only_symbols is not None:
-            symbols &= only_symbols
-        if not symbols:
+        on_db = load_symbols_for_date(config.database_url, date)
+        if not on_db:
             continue
+        symbols = on_db if only_symbols is None else on_db & only_symbols
+        if not symbols and pending is None:
+            continue   # 這天不用寫，也沒有前一天在等它的前日餘額
 
-        twse, twse_err = _fetch_margin_table_for_date(
-            session, date, fetch_twse_margin, prepare_twse_margin, "TWSE")
-        tpex, tpex_err = _fetch_margin_table_for_date(
-            session, date, fetch_tpex_margin_v2, prepare_tpex_margin_v2, "TPEX")
-        for err in (twse_err, tpex_err):
-            if err:
-                print(f"  {date} {err}")
-                problems.append(f"{date} {err.split('：')[0].split(' ')[0]}")
+        twse, tpex = _fetch_margin_tables(session, date, problems)
+        day = _MarginDay(date, twse, tpex, symbols, len(on_db))
+        if pending is not None:
+            total += _settle_and_write_margin_day(config, pending, day, unsettled)
+        pending = day if symbols else None
 
-        updates = []
-        for symbol in sorted(symbols):
-            data = _get_margin_data(symbol, twse, tpex)
-            if all(v is None for v in data.values()):
-                continue   # 不在任一來源表內（例如不開放信用交易），不動
-            data["short_margin_ratio"] = _short_margin_ratio(
-                data.get("margin_balance"), data.get("short_balance"))
-            updates.append((symbol, date, data))
-        n_updated = update_margin_batch(config.database_url, updates)
-        total += n_updated
-        print(f"  {date} 更新 {n_updated} 列（DB 有 {len(symbols)} 檔）")
+    if pending is not None:
+        next_day = _fetch_next_margin_day(session, config, dates[-1])
+        total += _settle_and_write_margin_day(config, pending, next_day, unsettled)
 
     print(f"融資融券回補完成，共更新 {total} 列")
+    if unsettled:
+        print(f"ℹ 以下保留交易所當日餘額、未以隔日前日餘額校正：{'、'.join(unsettled)}")
     if problems:
         print(f"⚠ 未回補的日期／市場（可縮小範圍重跑）：{'、'.join(problems)}")
 

@@ -331,6 +331,15 @@ class TestParseTwseMarginAllPayload:
         # short_change = 券賣 - 券買 - 現券償還 = 0 - 59 - 0
         assert row["short_change"] == -59
 
+    def test_prepare_twse_margin_exposes_prev_balances(self):
+        """前日餘額是 --backfill-margin 校正 D-1 餘額的依據，不可與今日餘額混淆。"""
+        df, _ = _parse_twse_margin_all_payload(_make_margin_all_payload())
+        row = prepare_twse_margin(df).iloc[0]
+        assert row["prev_margin_balance"] == 12777
+        assert row["margin_balance"] == 10371
+        assert row["prev_short_balance"] == 59
+        assert row["short_balance"] == 0
+
     def test_stat_not_ok_raises_data_unavailable(self):
         """尚未發布/休市 → DataUnavailableError（retry decorator 不重試、立即拋）。"""
         payload = _make_margin_all_payload(stat="很抱歉，沒有符合條件的資料!")
