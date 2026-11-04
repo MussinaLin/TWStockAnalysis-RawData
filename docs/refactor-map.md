@@ -101,7 +101,7 @@ CLAUDE.md 說它是「CLI 入口、每日抓取編排」。實際上除此之外
 - **CLI 層**：`_parse_args`, `_parse_date`, `_build_date_range`, `_is_daily_mode`, `_parse_trading_day`
 - **4 個子命令**：`_update_shares_command`, `_dahu_command`, `_backfill_limits_command`, `_backfill_disposition_command`
 - **抽象層**：`RowSourceProvider`(Protocol, 796) / `BatchSourceProvider`(819) / `PerSymbolRangeProvider`(896) — 全套件唯一存在的抽象層
-- **領域邏輯**：`_reference_price`, `_price_limits`（漲跌停）、`DispositionData`(512) + `_disposition_windows` + `_fetch_disposition`（處置股）、`_expected_prev_trade_date`（交易日推算）
+- **領域邏輯**：`_reference_price`, `_price_limits`（漲跌停）、`DispositionData`(512) + `_disposition_windows` + `_fetch_disposition`（處置股）
 - **快取層**：`_prefetch_margin_cache`, `_prefetch_holding_pct_cache`, `_prefetch_symbol_ohlcv`, `twse_month_cache`
 - **編排**：`_run_for_date`, `_main_inner`, `_fetch_ohlcv_with_fallback`, `_build_daily_rows`
 
