@@ -6,7 +6,7 @@ import datetime as dt
 
 import pytest
 
-from tests.conftest import FakeSession
+from tests.conftest import FakeResponse, FakeSession
 from tw_stock_rawdata.prepare import prepare_twse_margin
 from tw_stock_rawdata.sources import (
     DataUnavailableError,
@@ -19,6 +19,7 @@ from tw_stock_rawdata.sources import (
     _parse_roc_date,
     _parse_twse_margin_all_payload,
     _roc_to_date,
+    fetch_tdcc_distribution,
     fetch_twse_margin,
     fetch_twse_mi_index,
 )
@@ -443,3 +444,26 @@ class TestFetchTwseMiIndexStat:
         session = FakeSession(payload=[{"stat": "OK"}])
         with pytest.raises(DataUnavailableError, match="回傳格式異常"):
             fetch_twse_mi_index(session, dt.date(2026, 8, 21))
+
+
+# ---------------------------------------------------------------------------
+# fetch_tdcc_distribution
+# ---------------------------------------------------------------------------
+
+
+class _PostSession:
+    """TDCC 走 POST；回固定的 HTML。"""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def post(self, url, data=None, timeout=None, verify=None, **kwargs):
+        return FakeResponse(text=self._text)
+
+
+def test_tdcc_page_without_any_table_raises_data_unavailable():
+    """錯誤頁沒有表格時要拋 DataUnavailableError（--dahu 跳過該檔）；read_html 不指定
+    flavor 會改試未安裝的 bs4＋html5lib、拋 ImportError 中斷整批。"""
+    session = _PostSession("<html><body><p>系統忙碌中</p></body></html>")
+    with pytest.raises(DataUnavailableError, match="頁面解析失敗"):
+        fetch_tdcc_distribution(session, "token", "2330", dt.date(2026, 5, 29))

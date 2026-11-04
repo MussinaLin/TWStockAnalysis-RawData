@@ -46,6 +46,11 @@ MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
 MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
 TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
 
+# pd.read_html 一律指定 lxml。不指定時 lxml 找不到表格會改試 bs4＋html5lib，而兩者都不是
+# 依賴（Docker 只裝 pyproject 宣告的套件）→ 拋 ImportError 而非 ValueError，穿過所有
+# except ValueError 與 _retry_on_transient，錯誤頁／限流頁會中斷整個 daily 或回補。
+_READ_HTML_FLAVOR = "lxml"
+
 
 class DataUnavailableError(RuntimeError):
     pass
@@ -927,7 +932,9 @@ def fetch_moneydj_margin(
     # 不在此攔截 read_html 的 ValueError：讓它往上拋給 _retry_on_transient 重試
     # （MoneyDJ 偶發回傳壞/不完整 HTML 的暫時性情境）；用盡 retry 後 decorator 會
     # 把 ValueError 轉成 DataUnavailableError，呼叫端語意不變。
-    tables = pd.read_html(io.StringIO(response.text), encoding="utf-8")
+    tables = pd.read_html(
+        io.StringIO(response.text), encoding="utf-8", flavor=_READ_HTML_FLAVOR
+    )
 
     # Find the margin data table - it's typically the largest table with date data
     # MoneyDJ table structure:
@@ -1069,7 +1076,7 @@ def fetch_moneydj_holding_pct(
     response = _http_get(session, MONEYDJ_HOLDING_URL, params)
 
     try:
-        tables = pd.read_html(io.StringIO(response.text))
+        tables = pd.read_html(io.StringIO(response.text), flavor=_READ_HTML_FLAVOR)
     except ValueError as exc:
         raise DataUnavailableError(f"MoneyDJ 法人持股頁面解析失敗：{exc}") from exc
 
@@ -1331,7 +1338,7 @@ def fetch_tdcc_distribution(
     next_token = token_match.group(1) if token_match else token
 
     try:
-        tables = pd.read_html(io.StringIO(resp.text))
+        tables = pd.read_html(io.StringIO(resp.text), flavor=_READ_HTML_FLAVOR)
     except ValueError as exc:
         raise DataUnavailableError(f"TDCC {symbol} {date_str} 頁面解析失敗：{exc}") from exc
 

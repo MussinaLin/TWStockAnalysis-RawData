@@ -274,6 +274,13 @@ TWSE 限流——而限流回應與「真的沒資料」是同一個字串，無
 - `MI_INDEX` 額外有一條 fallback：端點沒宣告日期但確實有資料、且抓的就是今天時，
   視為今天；歷史日不做這個推定。
 
+HTML 頁面（MoneyDJ 融資融券／法人持股、TDCC 集保分布）的 `pd.read_html` 一律指定
+`flavor="lxml"`。不指定時，lxml 找不到表格會改試 bs4＋html5lib，而兩者都不是依賴
+（Docker 只裝 `pyproject.toml` 宣告的套件），錯誤頁／限流頁就會拋 `ImportError`、
+繞過重試與「該檔取得失敗就跳過」的處理，中斷整個 daily 或回補。指定後一律是
+`ValueError` → 重試 → `DataUnavailableError`。**不要**為了讓備援可用而加裝 html5lib：
+沒有表格的頁面換哪個解析器都一樣找不到表格。
+
 ### 來源失敗一律印 log
 
 任何來源取得失敗都要印出「哪個來源、哪一檔、什麼原因」，**不可靜默吞掉**——即使該來源
