@@ -205,5 +205,15 @@ def test_renamed_estimated_holding_total_raises() -> None:
         _fetch(html)
 
 
+def test_page_without_any_table_raises_data_unavailable() -> None:
+    """錯誤頁／限流頁沒有表格時要拋 DataUnavailableError，讓呼叫端跳過該檔。
+
+    read_html 不指定 flavor 時，lxml 找不到表格會改試 bs4＋html5lib；兩者都不是
+    依賴（Docker 也沒裝），會拋 ImportError、穿過 except ValueError 中斷整個流程。
+    """
+    with pytest.raises(DataUnavailableError, match="法人持股頁面解析失敗"):
+        _fetch("<html><body><p>無資料</p></body></html>")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
