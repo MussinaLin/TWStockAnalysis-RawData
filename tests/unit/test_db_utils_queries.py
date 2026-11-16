@@ -140,3 +140,63 @@ class TestUpsertMarketDaily:
         db_utils.upsert_market_daily(URL, dt.date(2026, 8, 21), {"bogus": 1})
         _sql, params = cur.executed[0]
         assert "bogus" not in params
+
+    def test_futures_oi_columns_are_written_with_coalesce(self, monkeypatch) -> None:
+        cur, _ = _pool(monkeypatch)
+        db_utils.upsert_market_daily(
+            URL, dt.date(2026, 11, 16), {"txf_foreign_oi_net": -96787}
+        )
+        sql, params = cur.executed[0]
+        assert params["txf_foreign_oi_net"] == -96787
+        for col in FUTURES_OI_COLS:
+            assert f"{col} = COALESCE(EXCLUDED.{col}, market_daily.{col})" in sql
+
+
+FUTURES_OI_COLS = [
+    f"txf_{who}_oi_net{suffix}"
+    for who in ("foreign", "trust", "dealer", "total")
+    for suffix in ("", "_amount")
+]
+
+
+class TestUpdateMarketFuturesOiBatch:
+    def test_empty_skips_db(self, monkeypatch) -> None:
+        cur, conn = _pool(monkeypatch)
+        assert db_utils.update_market_futures_oi_batch(URL, []) == 0
+        assert cur.executed == []
+        assert not conn.committed
+
+    def test_updates_existing_rows_only_with_coalesce(self, monkeypatch) -> None:
+        """只 UPDATE 不 INSERT：只有期貨欄的列會被 find_consensus_prev_trade_date 當成 D-1。"""
+        cur, conn = _pool(monkeypatch, rowcounts=[2])
+        updates = [
+            (dt.date(2026, 11, 13), {"txf_foreign_oi_net": -1, "txf_total_oi_net": None}),
+            (dt.date(2026, 11, 16), {"txf_foreign_oi_net": -2}),
+        ]
+        assert db_utils.update_market_futures_oi_batch(URL, updates) == 2
+        sql, params = cur.executed[0]
+        assert sql.startswith("UPDATE market_daily AS t")
+        assert "INSERT" not in sql
+        assert "WHERE t.trade_date = v.trade_date" in sql
+        for col in FUTURES_OI_COLS:
+            assert f"{col} = COALESCE(v.{col}, t.{col})" in sql
+        width = 1 + len(FUTURES_OI_COLS)
+        assert len(params) == 2 * width
+        assert params[0] == dt.date(2026, 11, 13)
+        assert params[1 + FUTURES_OI_COLS.index("txf_foreign_oi_net")] == -1
+        assert params[width + 1 + FUTURES_OI_COLS.index("txf_trust_oi_net")] is None
+        assert conn.committed
+
+
+class TestLoadMarketDatesInRange:
+    def test_returns_date_set(self, monkeypatch) -> None:
+        cur, _ = _pool(monkeypatch, fetchall_rows=[
+            (dt.date(2026, 11, 13),), (dt.date(2026, 11, 16),),
+        ])
+        out = db_utils.load_market_dates_in_range(
+            URL, dt.date(2026, 11, 1), dt.date(2026, 11, 30)
+        )
+        assert out == {dt.date(2026, 11, 13), dt.date(2026, 11, 16)}
+        sql, params = cur.executed[0]
+        assert "FROM market_daily" in sql and "BETWEEN" in sql
+        assert params == (dt.date(2026, 11, 1), dt.date(2026, 11, 30))

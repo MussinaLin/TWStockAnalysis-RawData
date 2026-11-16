@@ -523,6 +523,14 @@ def load_symbols_in_range(
 # ---------------------------------------------------------------------------
 
 
+# 期交所臺股期貨（大台）三大法人未平倉淨額：口數與金額（元）各 4 欄（3 法人＋合計）。
+_FUTURES_OI_COLS = [
+    f"txf_{who}_oi_net{suffix}"
+    for who in ("foreign", "trust", "dealer", "total")
+    for suffix in ("", "_amount")
+]
+
+
 def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> None:
     """Upsert a single row into market_daily table.
 
@@ -530,12 +538,14 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         database_url: PostgreSQL connection string.
         trade_date: The trading date.
         data: dict with keys: taiex_open, taiex_high, taiex_low, taiex_close,
-              total_volume, margin_balance, margin_balance_change, foreign_net.
+              total_volume, margin_balance, margin_balance_change, foreign_net,
+              以及 `_FUTURES_OI_COLS` 的台指期未平倉欄。
     """
     row = {"trade_date": trade_date, **data}
     cols = [
         "trade_date", "taiex_open", "taiex_high", "taiex_low", "taiex_close",
         "total_volume", "margin_balance", "margin_balance_change", "foreign_net",
+        *_FUTURES_OI_COLS,
     ]
     # Only include columns that exist in data
     row = {c: row.get(c) for c in cols}
@@ -551,6 +561,63 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
     with _connect(database_url) as conn:
         conn.execute(sql, row)
         conn.commit()
+
+
+def update_market_futures_oi_batch(
+    database_url: str,
+    updates: list[tuple[dt.date, dict]],
+) -> int:
+    """批次覆寫 market_daily 的台指期三大法人未平倉欄（--backfill-futures-oi 用）。
+
+    只 UPDATE 已存在的 row，不 INSERT：只有期貨欄的列沒有大盤行情，卻會被
+    `find_consensus_prev_trade_date` 當成 market_daily 的 D-1，打亂融資融券校正。
+    新值為 NULL 的欄位保留舊值（COALESCE），與 upsert_market_daily 一致。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        updates: list of (trade_date, data_dict)，data_dict 的鍵同 `_FUTURES_OI_COLS`
+                 （缺鍵視為 NULL）。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計（不存在的 trade_date 不算）。
+    """
+    if not updates:
+        return 0
+
+    casts = ", ".join(["%s::bigint"] * len(_FUTURES_OI_COLS))
+    set_clause = ", ".join(f"{c} = COALESCE(v.{c}, t.{c})" for c in _FUTURES_OI_COLS)
+    n_updated = 0
+    with _connect(database_url) as conn:
+        with conn.cursor() as cur:
+            for start in range(0, len(updates), _BATCH_UPDATE_CHUNK):
+                chunk = updates[start:start + _BATCH_UPDATE_CHUNK]
+                values = ", ".join([f"(%s::date, {casts})"] * len(chunk))
+                sql = (
+                    f"UPDATE market_daily AS t SET {set_clause}"
+                    f" FROM (VALUES {values})"
+                    f" AS v(trade_date, {', '.join(_FUTURES_OI_COLS)})"
+                    " WHERE t.trade_date = v.trade_date"
+                )
+                params: list = []
+                for trade_date, data in chunk:
+                    params.append(trade_date)
+                    params.extend(_safe(data.get(c)) for c in _FUTURES_OI_COLS)
+                cur.execute(sql, params)
+                n_updated += cur.rowcount
+        conn.commit()
+    return n_updated
+
+
+def load_market_dates_in_range(
+    database_url: str, start: dt.date, end: dt.date
+) -> set[dt.date]:
+    """回傳 [start, end] 內 market_daily 已存在的 trade_date（--backfill-futures-oi 用）。"""
+    with _connect(database_url) as conn:
+        rows = conn.execute(
+            "SELECT trade_date FROM market_daily WHERE trade_date BETWEEN %s AND %s",
+            (start, end),
+        ).fetchall()
+    return {r[0] for r in rows}
 
 
 # ---------------------------------------------------------------------------

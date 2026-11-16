@@ -129,9 +129,30 @@ CREATE TABLE IF NOT EXISTS market_daily (
     margin_balance        BIGINT,
     margin_balance_change BIGINT,
     foreign_net           BIGINT,
+    txf_foreign_oi_net         BIGINT,
+    txf_foreign_oi_net_amount  BIGINT,
+    txf_trust_oi_net           BIGINT,
+    txf_trust_oi_net_amount    BIGINT,
+    txf_dealer_oi_net          BIGINT,
+    txf_dealer_oi_net_amount   BIGINT,
+    txf_total_oi_net           BIGINT,
+    txf_total_oi_net_amount    BIGINT,
     created_time          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_time          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- 既有資料庫的線上 migration：補上後加的台指期三大法人未平倉欄（idempotent）。
+-- 來源：期交所「三大法人－區分各期貨契約」，只取臺股期貨（大台，TXF）。
+-- txf_*_oi_net：多空未平倉口數淨額（口），正 = 淨多單、負 = 淨空單。
+-- txf_*_oi_net_amount：多空未平倉契約金額淨額（元；期交所原始單位千元 × 1000）。
+-- total = 外資及陸資 + 投信 + 自營商；任一身份別缺席時為 NULL（不把缺的當 0）。
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_foreign_oi_net        BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_foreign_oi_net_amount BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_trust_oi_net          BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_trust_oi_net_amount   BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_dealer_oi_net         BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_dealer_oi_net_amount  BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_total_oi_net          BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_total_oi_net_amount   BIGINT;
 
 -- stock_holder_percent (大戶 / 散戶持股佔比)
 -- 資料來源：TDCC 集保戶股權分散表，每週更新一次（trade_date 為週五結算日）。
