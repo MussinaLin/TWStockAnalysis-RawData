@@ -42,6 +42,9 @@ TPEX_MARGIN_V2_URL = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
 # 處置期間最長 10 個營業日、公告日又早於期間起日，用快照會漏掉處置期間中段的個股。
 TWSE_PUNISH_URL = "https://www.twse.com.tw/rwd/zh/announcement/punish"
 TPEX_DISPOSAL_V2_URL = "https://www.tpex.org.tw/www/zh-tw/bulletin/disposal"
+# 期交所三大法人「區分各期貨契約」CSV 下載。吃日期區間（實測近三年整段一發回完），
+# 但只保留近三年；休市、超出範圍都回 HTTP 200 + HTML alert，見 fetch_taifex_txf_institutional。
+TAIFEX_FUT_CONTRACTS_DOWN_URL = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
 MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
 MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
 TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
@@ -1257,6 +1260,54 @@ def fetch_twse_market_margin(
     params = {"response": "json", "date": date.strftime("%Y%m%d"), "selectType": "MS"}
     resp = _http_get(session, TWSE_MARKET_MARGIN_URL, params)
     return _parse_market_margin_payload(resp.json())
+
+
+# ---------------------------------------------------------------------------
+# TAIFEX 期交所
+# ---------------------------------------------------------------------------
+
+_TAIFEX_ALERT_RE = re.compile(r'alert\(\s*"([^"]*)"\s*\)')
+
+
+@_retry_on_transient
+def fetch_taifex_txf_institutional(
+    session: requests.Session,
+    start: dt.date,
+    end: dt.date,
+) -> pd.DataFrame:
+    """抓臺股期貨（大台，TXF）在 [start, end] 的三大法人交易與未平倉，回傳原始字串表。
+
+    每個交易日 3 列（自營商／投信／外資及陸資）。端點吃區間，回補整段只需一發。
+
+    回應是 cp950 CSV（content-type 卻標 text/html）。錯誤一律是 HTTP 200 + UTF-8 的
+    HTML alert 頁，只能從內容分辨：休市回「查無資料」、起日早於近三年回「日期時間錯誤」。
+    兩者都丟 DataUnavailableError（不重試）。
+
+    不經 `_http_get`：這是 POST，且期交所憑證鏈驗得過，維持預設的 TLS 驗證。
+    """
+    data = {
+        "queryStartDate": start.strftime("%Y/%m/%d"),
+        "queryEndDate": end.strftime("%Y/%m/%d"),
+        "commodityId": "TXF",
+    }
+    response = session.post(TAIFEX_FUT_CONTRACTS_DOWN_URL, data=data, timeout=30)
+    response.raise_for_status()
+    content = response.content
+
+    if content.lstrip().startswith(b"<"):
+        page = content.decode("utf-8", errors="replace")
+        match = _TAIFEX_ALERT_RE.search(page)
+        if match is None:
+            raise DataUnavailableError("期交所回傳非 CSV 內容（亦無錯誤訊息）")
+        message = match.group(1)
+        if "日期時間錯誤" in message:
+            raise DataUnavailableError(
+                f"期交所回應「{message}」：該端點只提供近三年資料，"
+                f"起日 {start} 可能太舊"
+            )
+        raise DataUnavailableError(f"期交所回應「{message}」（{start} ~ {end}）")
+
+    return pd.read_csv(io.StringIO(content.decode("cp950")), dtype=str)
 
 
 # ---------------------------------------------------------------------------
