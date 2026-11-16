@@ -56,12 +56,14 @@ from .prepare import (
     prepare_twse_issued_shares,
     prepare_twse_margin,
     prepare_twse_mi_index,
+    prepare_taifex_txf_oi,
 )
 from .price_limit import calc_limits
 from .sources import (
     DataUnavailableError,
     build_session,
     fetch_moneydj_holding_pct,
+    fetch_taifex_txf_institutional,
     fetch_moneydj_margin,
     fetch_tdcc_distribution,
     fetch_tdcc_token_and_dates,
@@ -2813,7 +2815,7 @@ def _refresh_prev_day_margin(
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
-    """Fetch TAIEX OHLC, volume, foreign net, margin and upsert to market_daily."""
+    """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉 and upsert to market_daily."""
     market_data: dict = {}
 
     try:
@@ -2845,6 +2847,15 @@ def _fetch_and_upsert_market_daily(
             market_data.update(margin)
     except requests.RequestException as exc:
         print(f"  大盤融資餘額取得失敗：{exc}")
+
+    # 期交所台指期三大法人未平倉（不同站，不受 TWSE pacing 影響）。休市、尚未公布、
+    # 表頭改版都是 DataUnavailableError：只是這幾欄不寫，不影響其他來源。
+    try:
+        oi_map = prepare_taifex_txf_oi(fetch_taifex_txf_institutional(session, date, date))
+        if date in oi_map:
+            market_data.update(oi_map[date])
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"  台指期三大法人未平倉取得失敗：{exc}")
 
     if prev_margin_balance is not None:
         try:
