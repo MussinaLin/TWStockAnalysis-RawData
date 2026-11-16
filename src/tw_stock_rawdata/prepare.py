@@ -11,6 +11,7 @@ import datetime as dt
 from .sources import (
     _clean_int,
     _clean_number,
+    _parse_date_any,
     _parse_roc_date,
     _parse_roc_date_compact,
     _roc_to_date,
@@ -1087,4 +1088,57 @@ def expand_tpex_stock_day(
             "volume": None if lots is None else lots * 1000,
             "change": _clean_number(row.get("漲跌")),
         }
+    return out
+
+
+# 期交所身份別 -> market_daily 欄名中段。名稱改版時寧可報錯，也不要默默少寫一欄。
+_TAIFEX_IDENTITIES = {"外資及陸資": "foreign", "投信": "trust", "自營商": "dealer"}
+_TAIFEX_TXF_PRODUCT = "臺股期貨"
+_TAIFEX_OI_LOTS_COL = "多空未平倉口數淨額"
+_TAIFEX_OI_AMOUNT_COL = "多空未平倉契約金額淨額(千元)"
+
+
+def prepare_taifex_txf_oi(df: pd.DataFrame) -> dict[dt.date, dict[str, int | None]]:
+    """把期交所三大法人期貨 CSV 轉成 {date: market_daily 的 8 個台指期未平倉欄}。
+
+    只取「臺股期貨」（大台）。欄位：`txf_{foreign,trust,dealer,total}_oi_net`（口）與
+    對應的 `_amount`（元，CSV 是千元 × 1000）。total 是三個身份別相加，任一缺席就是
+    None——缺的不當 0 加，交給 upsert 的 COALESCE 保留舊值。
+
+    欄位一律按表頭名稱取，表頭、商品名稱、身份別或日期認不得都丟 DataUnavailableError。
+    """
+    df = df.rename(columns=lambda c: str(c).strip())
+    required = ["日期", "商品名稱", "身份別", _TAIFEX_OI_LOTS_COL, _TAIFEX_OI_AMOUNT_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise DataUnavailableError(f"期交所 CSV 表頭缺少欄位：{'、'.join(missing)}")
+
+    txf = df.loc[df["商品名稱"].astype(str).str.strip() == _TAIFEX_TXF_PRODUCT]
+    if txf.empty:
+        raise DataUnavailableError(f"期交所 CSV 找不到「{_TAIFEX_TXF_PRODUCT}」的列")
+
+    out: dict[dt.date, dict[str, int | None]] = {}
+    for _, row in txf.iterrows():
+        date = _parse_date_any(str(row["日期"]))
+        if date is None:
+            raise DataUnavailableError(f"期交所 CSV 日期無法解析：{row['日期']!r}")
+        identity = str(row["身份別"]).strip()
+        who = _TAIFEX_IDENTITIES.get(identity)
+        if who is None:
+            raise DataUnavailableError(f"期交所 CSV 出現無法辨識的身份別：{identity!r}")
+
+        day = out.setdefault(date, {
+            f"txf_{w}_oi_net{suffix}": None
+            for w in (*_TAIFEX_IDENTITIES.values(), "total")
+            for suffix in ("", "_amount")
+        })
+        amount = _clean_int(row[_TAIFEX_OI_AMOUNT_COL])
+        day[f"txf_{who}_oi_net"] = _clean_int(row[_TAIFEX_OI_LOTS_COL])
+        day[f"txf_{who}_oi_net_amount"] = None if amount is None else amount * 1000
+
+    for day in out.values():
+        for suffix in ("", "_amount"):
+            parts = [day[f"txf_{w}_oi_net{suffix}"] for w in _TAIFEX_IDENTITIES.values()]
+            if all(p is not None for p in parts):
+                day[f"txf_total_oi_net{suffix}"] = sum(parts)
     return out
