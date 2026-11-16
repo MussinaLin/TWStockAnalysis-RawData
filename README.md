@@ -358,6 +358,11 @@ HTML 頁面（MoneyDJ 融資融券／法人持股、TDCC 集保分布）的 `pd.
 - 歷史單日回補（無 cache）的 MoneyDJ 融資融券：`{symbol} 融資融券取得失敗：{原因}`。
 - OHLCV fallback 鏈最後一環 `STOCK_DAY` 月表：`{symbol} STOCK_DAY 月表取得失敗：{原因}`
   （該檔 OHLCV 缺值寫 `NULL`）。
+- `market_daily` 的 5 個子來源各自印 `大盤 OHLC／大盤成交金額／大盤外資買賣超／大盤融資餘額／
+  台指期三大法人未平倉 取得失敗：{原因}`。包含「月表抓到了但沒有當日」（`MI_5MINS_HIST`、
+  `FMTQIK`）與 TWSE `stat` 不是 `OK`（`BFI82U`、`MI_MARGN`，原因帶 `stat` 原文，限流字串
+  看得出來）。這些欄寫成 `NULL` 後不會有流程回頭補，`MI_MARGN` 失敗還會連帶跳過 D-1
+  校正，曾因此讓 DEV／PROD 的大盤融資餘額與外資買賣超各自缺漏而無人察覺。
 
 ### 每日 D-1 融資融券修正
 
