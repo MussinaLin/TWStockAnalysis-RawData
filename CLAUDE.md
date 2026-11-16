@@ -37,6 +37,7 @@ tw-stock-rawdata --backfill-start ... --backfill-end ... --force  # 強制覆蓋
 tw-stock-rawdata --backfill-disposition --backfill-start ... --backfill-end ...  # 只回補處置股註記
 tw-stock-rawdata --backfill-trust-holding --backfill-start ... --backfill-end ...  # 只回補投信持股比例
 tw-stock-rawdata --backfill-margin --backfill-start ... --backfill-end ...  # 只回補融資融券（交易所逐日整批；餘額以隔日前日餘額為準）
+tw-stock-rawdata --backfill-futures-oi --backfill-start ... --backfill-end ...  # 只回補台指期三大法人未平倉（期交所整段 1 發、只近三年）
 tw-stock-rawdata --update-shares      # 只刷新 stocks.issued_shares
 
 # 測試
@@ -46,7 +47,7 @@ pytest tests/unit/
 ## 架構（src/tw_stock_rawdata/）
 
 - `run.py`     — CLI 入口、每日抓取編排（`_run_for_date` 為主流程）
-- `sources.py` — 對外抓資料（TWSE / TPEX / MoneyDJ），含 retry 機制
+- `sources.py` — 對外抓資料（TWSE / TPEX / MoneyDJ / TDCC / TAIFEX），含 retry 機制
 - `prepare.py` — 把各來源回傳的 DataFrame normalize 成標準欄位
 - `db_utils.py`— upsert 邏輯（stocks / daily_raw / market_daily）
 - `db.py`      — 連線池、schema 建立、年度 partition
@@ -60,7 +61,7 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 - `stocks` — 個股 master（symbol PK、issued_shares、enabled、alpha_pick_enabled）
 - `stock_daily_raw` — 每日逐檔 raw（PK `(symbol, trade_date)`，**按年 RANGE partition**）
   含處置股註記 `is_disposition` / `disposition_match_minutes`（語意見 README）
-- `market_daily` — 大盤每日行情（trade_date PK）
+- `market_daily` — 大盤每日行情（trade_date PK），含台指期（大台）三大法人未平倉淨額 `txf_*`
 
 ## Gotchas（重要不變量，改動前必讀）
 
@@ -96,3 +97,6 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
   算出「參考價 = 收盤」的錯誤漲跌停價。另：change 的取得寫成獨立區塊，**不可**加進
   `STOCK_DAY` 逐檔月表區塊的 `any(v is None ...)` 觸發條件（那是逐檔 HTTP，
   加進去會讓每檔都多打一次 API）。
+- **`--backfill-futures-oi` 只 UPDATE 不 INSERT `market_daily`**：只有期貨欄的列沒有大盤
+  行情，卻會被 `find_consensus_prev_trade_date` 當成 D-1，打亂融資融券校正。期交所的錯誤
+  （休市「查無資料」、超過近三年「日期時間錯誤」）都是 HTTP 200 + HTML alert，靠內容判斷。

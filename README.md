@@ -1,12 +1,12 @@
 # TWStockAnalysis-RawData
 
-每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
+每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情、台指期三大法人未平倉），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
 
 ## 職責邊界
 
 本 repo 只負責：
 
-- 從 TWSE / TPEX / MoneyDJ / TDCC 抓 raw data
+- 從 TWSE / TPEX / MoneyDJ / TDCC / TAIFEX（期交所）抓 raw data
 - 寫入 PostgreSQL：`stocks`、`stock_daily_raw`、`market_daily`、`stock_holder_percent`
 
 不負責：技術指標、選股、賣出警示、Telegram 通知（由下游 TWStockAnalysis 負責）。
@@ -66,6 +66,9 @@ tw-stock-rawdata --backfill-trust-holding --backfill-start 2024-01-02 --backfill
 
 # 只回補 9 個融資融券欄位（來源：交易所逐日整批），可選 --backfill-stocks 限定股票
 tw-stock-rawdata --backfill-margin --backfill-start 2026-04-07 --backfill-end 2026-05-28
+
+# 只回補 market_daily 的台指期三大法人未平倉 8 欄（期交所整段 1 次請求，只提供近三年）
+tw-stock-rawdata --backfill-futures-oi --backfill-start 2025-01-01 --backfill-end 2026-11-16
 
 # 強制覆蓋既有資料
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force
@@ -219,6 +222,41 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
 - DB 當日無列（週末、休市）不發請求。某日某市場失敗不中斷，收尾列出未回補的日期與市場。
   結果冪等，可重複執行。
 
+### 台指期三大法人未平倉（market_daily.txf_*）
+
+`market_daily` 存臺股期貨（大台，TXF）的三大法人未平倉淨額，用來看外資等法人在期貨端的
+避險／佈局方向。來源是期交所「三大法人－區分各期貨契約」CSV 下載
+（`POST https://www.taifex.com.tw/cht/3/futContractsDateDown`，`commodityId=TXF`）。
+
+| 欄位 | 意義 |
+|------|------|
+| `txf_foreign_oi_net` / `txf_trust_oi_net` / `txf_dealer_oi_net` | 外資及陸資／投信／自營商的多空未平倉**口數**淨額（口），正 = 淨多單、負 = 淨空單 |
+| `txf_total_oi_net` | 三者相加（口） |
+| `*_amount`（四欄對應） | 多空未平倉**契約金額**淨額（元；期交所原始單位千元 × 1000） |
+
+- **只算大台**，不含小台（MXF）、微台（TMF）。這是一般看盤軟體「外資台指期淨未平倉」的口徑。
+- **合計欄**在任一身份別缺席時為 `NULL`，缺的不當 0 加（搭配 upsert 的 `COALESCE` 保留舊值）。
+- **daily**：`market_daily` 的第 5 個子來源，抓當日單日。與其他 4 個（TWSE）來源各自獨立失敗，
+  失敗只是這 8 欄不寫。一般 `--backfill-start/--backfill-end` 同樣每天打 1 次單日查詢。
+- **端點特性**（2026-11-16 實測）：
+  - 吃日期區間，近三年整段一次回完（723 個交易日、約 1.6 秒）。
+  - **只保留近三年**：起日太舊回「日期時間錯誤」。
+  - 錯誤一律是 HTTP 200 + HTML alert 頁（休市回「查無資料」），程式從內容判斷，丟
+    `DataUnavailableError`、不重試。
+  - 回應是 cp950 編碼的 CSV（content-type 卻標 `text/html`）。
+- **欄位一律按表頭名稱取**；表頭、商品名稱「臺股期貨」、身份別（外資及陸資／投信／自營商）
+  或日期認不得就整批報錯，不默默少寫一欄。
+
+#### 只回補台指期未平倉（--backfill-futures-oi）
+
+- 範圍取區間內 `market_daily` **已有列**的最早～最晚日，整段只打 **1 次**請求（不逐日、不切窗口：
+  端點只保留近三年，而近三年整段一次回得完）。
+- **只 UPDATE 已存在的列、不 INSERT**：只有期貨欄的列沒有大盤行情，卻會被 D-1 共識判斷
+  （`find_consensus_prev_trade_date`）當成 `market_daily` 的前一交易日，打亂融資融券校正。
+- 只寫這 8 欄，來源 `NULL` 不覆寫。收尾列出兩邊對不上的日期：`market_daily` 有、期交所沒有
+  （未回補）；期交所有、`market_daily` 沒有（未寫入，先跑一般回補再重跑這個）。
+- `--backfill-stocks`、`--date` 會被忽略並印警告（大盤層級資料）。結果冪等，可重複執行。
+
 ### 回補特定股票（--backfill-stocks）
 
 `--backfill-stocks` 走 **per-stock 區間抓取**，與其他回補模式的成本結構不同：
@@ -300,6 +338,7 @@ TWSE 限流——而限流回應與「真的沒資料」是同一個字串，無
 - `STOCK_DAY_ALL` / `MI_INDEX` / TWSE 融資融券：資料日期不等於請求日期就**棄用**
   （TWSE 尚未發布時會回前一日資料，寫下去等於把 D-1 標成 D）。
 - TPEX 整批：日期不符只印訊息、**資料照用**。
+- 期交所台指期未平倉：CSV 以日期為鍵，只取請求日（daily）或 DB 已有的日子（回補）。
 - `MI_INDEX` 額外有一條 fallback：端點沒宣告日期但確實有資料、且抓的就是今天時，
   視為今天；歷史日不做這個推定。
 
