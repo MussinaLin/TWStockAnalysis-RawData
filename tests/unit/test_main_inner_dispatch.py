@@ -57,6 +57,11 @@ def spies(monkeypatch):
     monkeypatch.setattr(run, "_backfill_futures_oi_command", spy("backfill_futures_oi"))
     monkeypatch.setattr(run, "_run_for_date", spy("run_for_date", retval=True))
     monkeypatch.setattr(run, "_refresh_prev_day_margin", spy("refresh_prev_margin"))
+    calls["settle_dates"] = []
+    monkeypatch.setattr(
+        run, "_settle_market_margin",
+        lambda session, config, date: calls["settle_dates"].append(date),
+    )
     monkeypatch.setattr(run, "_prefetch_margin_cache", spy("prefetch_margin", retval={}))
     monkeypatch.setattr(run, "_prefetch_holding_pct_cache", spy("prefetch_holding", retval={}))
     monkeypatch.setattr(run, "_fetch_disposition", spy("fetch_disposition", retval=None))
@@ -248,3 +253,50 @@ def test_backfill_end_only_uses_target_date_as_start(spies) -> None:
         CONFIG, _args(backfill_end="2026-08-21"), TODAY, dt.date(2026, 8, 19)
     )
     assert spies.get("run_for_date") == 3
+
+
+class TestSettleMarketMarginAfterRewrite:
+    """重寫歷史日後，對最後一個寫入的日子以隔日前日餘額校正大盤融資（_settle_market_margin）。"""
+
+    def test_historical_single_date_is_settled(self, spies) -> None:
+        run._main_inner(CONFIG, _args(date="2026-08-19"), TODAY, dt.date(2026, 8, 19))
+        assert spies["settle_dates"] == [dt.date(2026, 8, 19)]
+
+    def test_today_is_not_settled(self, spies) -> None:
+        """今天沒有隔日可用，交給明天的 daily 校正（也不必查 DB）。"""
+        run._main_inner(CONFIG, _args(), TODAY, TODAY)
+        assert spies["settle_dates"] == []
+
+    def test_unwritten_single_date_is_not_settled(self, spies, monkeypatch) -> None:
+        monkeypatch.setattr(run, "_run_for_date", lambda *a, **k: False)
+        run._main_inner(CONFIG, _args(date="2026-08-19"), TODAY, dt.date(2026, 8, 19))
+        assert spies["settle_dates"] == []
+
+    def test_backfill_settles_last_written_date_once(self, spies, monkeypatch) -> None:
+        written = {dt.date(2026, 8, 17), dt.date(2026, 8, 18)}
+        monkeypatch.setattr(run, "_run_for_date", lambda *a, **k: a[1] in written)
+        run._main_inner(
+            CONFIG, _args(backfill_start="2026-08-17", backfill_end="2026-08-20"), TODAY, TODAY
+        )
+        assert spies["settle_dates"] == [dt.date(2026, 8, 18)]
+
+    def test_backfill_ending_today_is_not_settled(self, spies) -> None:
+        run._main_inner(
+            CONFIG, _args(backfill_start="2026-08-20", backfill_end="2026-08-21"), TODAY, TODAY
+        )
+        assert spies["settle_dates"] == []
+
+    def test_backfill_with_nothing_written_is_not_settled(self, spies, monkeypatch) -> None:
+        monkeypatch.setattr(run, "_run_for_date", lambda *a, **k: False)
+        run._main_inner(
+            CONFIG, _args(backfill_start="2026-08-17", backfill_end="2026-08-18"), TODAY, TODAY
+        )
+        assert spies["settle_dates"] == []
+
+    def test_backfill_stocks_does_not_touch_market_daily(self, spies) -> None:
+        run._main_inner(
+            CONFIG,
+            _args(backfill_stocks="2330", backfill_start="2026-08-17", backfill_end="2026-08-18"),
+            TODAY, TODAY,
+        )
+        assert spies["settle_dates"] == []

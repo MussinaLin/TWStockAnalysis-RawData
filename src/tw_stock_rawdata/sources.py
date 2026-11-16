@@ -1198,23 +1198,29 @@ def fetch_twse_market_volume(
 
 def fetch_twse_foreign_net(
     session: requests.Session, date: dt.date
-) -> int | None:
+) -> int:
     """Fetch foreign investor net buy/sell (外資買賣超) from BFI82U for a single date.
 
     Returns:
         foreign net amount (元), positive = net buy, negative = net sell.
-        None if data unavailable.
+
+    Raises:
+        DataUnavailableError: stat 不是 OK、無資料、找不到外資列或數值無法解析。訊息帶
+            TWSE 的 stat——限流回應與「沒資料」是同一句，至少要讓 log 看得到是哪一句。
     """
     params = {"response": "json", "dayDate": date.strftime("%Y%m%d"), "type": "day"}
     resp = _http_get(session, TWSE_FOREIGN_NET_URL, params)
     payload = resp.json()
     if payload.get("stat") != "OK" or not payload.get("data"):
-        return None
+        raise DataUnavailableError(f"BFI82U：{payload.get('stat') or '無資料'}")
 
     for row in payload["data"]:
         if "外資及陸資(不含外資自營商)" in str(row[0]):
-            return _clean_int(row[3])  # 買賣差額
-    return None
+            value = _clean_int(row[3])  # 買賣差額
+            if value is None:
+                raise DataUnavailableError(f"BFI82U 外資買賣差額無法解析：{row[3]!r}")
+            return value
+    raise DataUnavailableError("BFI82U 找不到「外資及陸資(不含外資自營商)」列")
 
 
 def _parse_market_margin_payload(payload: dict) -> dict | None:
@@ -1251,15 +1257,25 @@ def _parse_market_margin_payload(payload: dict) -> dict | None:
 
 def fetch_twse_market_margin(
     session: requests.Session, date: dt.date
-) -> dict | None:
+) -> dict:
     """Fetch market margin summary (融資融券彙總) from MI_MARGN for a single date.
 
     Returns:
-        {margin_balance, margin_balance_change, prev_margin_balance} (元) or None.
+        {margin_balance, margin_balance_change, prev_margin_balance} (元).
+
+    Raises:
+        DataUnavailableError: stat 不是 OK 或找不到融資金額列，訊息帶 TWSE 的 stat。
+            原本回 None、呼叫端靜默略過，連帶跳過 D-1 校正而無人察覺。
     """
     params = {"response": "json", "date": date.strftime("%Y%m%d"), "selectType": "MS"}
     resp = _http_get(session, TWSE_MARKET_MARGIN_URL, params)
-    return _parse_market_margin_payload(resp.json())
+    payload = resp.json()
+    parsed = _parse_market_margin_payload(payload)
+    if parsed is None:
+        stat = payload.get("stat")
+        reason = stat if stat != "OK" else "找不到「融資金額」列或今日餘額無法解析"
+        raise DataUnavailableError(f"MI_MARGN：{reason or '回傳異常'}")
+    return parsed
 
 
 # ---------------------------------------------------------------------------

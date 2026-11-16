@@ -20,6 +20,7 @@ from .db import close_pool, get_pool, init_schema
 from .db_utils import (
     correct_prev_margin_balance,
     find_consensus_prev_trade_date,
+    find_next_market_trade_date,
     get_config_value,
     get_enabled_stocks,
     load_market_dates_in_range,
@@ -2879,16 +2880,78 @@ def _refresh_prev_day_margin(
     )
 
 
+def _print_margin_correction(
+    result: tuple[dt.date, int | None, int, int | None, int | None] | None,
+) -> None:
+    """印出 correct_prev_margin_balance 的修正結果；None（不需修正）不印。"""
+    if result is None:
+        return
+    prev_date, old_balance, new_balance, old_change, new_change = result
+    old_bal_str = "NULL" if old_balance is None else f"{old_balance:,}"
+    old_chg_str = "NULL" if old_change is None else f"{old_change:,}"
+    new_chg_str = "NULL" if new_change is None else f"{new_change:,}"
+    print(
+        f"  大盤 D-1 ({prev_date}) margin_balance 修正："
+        f"舊={old_bal_str} → 新={new_balance:,}；"
+        f"margin_balance_change：舊={old_chg_str} → 新={new_chg_str} "
+        "(TWSE 事後修正)"
+    )
+
+
+def _settle_market_margin(
+    session: requests.Session, config: AppConfig, date: dt.date
+) -> None:
+    """重寫歷史日 D 後，以 D 下一交易日 N 公布的前日餘額校正 D 的大盤融資餘額。
+
+    處理 D 時寫入的是交易所 D 當日的速報餘額，只有處理 N 時才會校正 D；`--date D`
+    與一般回補的最後一天沒有「下一天」可處理，重寫後一定停在未校正的值。整個指令
+    只對最後寫入的那天呼叫一次（1 次 MI_MARGN 請求），不是每天都多打一次。
+
+    略過條件：DB 沒有 N（D 是最新一天，交給明天的 daily 校正）；N 的兩表共識前一
+    交易日不是 D（DB 缺日，N 的前日餘額不一定是 D 的）。收尾是附加動作，任何失敗
+    只印 log，不讓已完成的回補以 traceback 結束。
+    """
+    db_url = config.database_url
+    try:
+        next_date = find_next_market_trade_date(db_url, date)
+        if next_date is None:
+            print(
+                f"  大盤融資收尾校正略過：market_daily 在 {date} 之後沒有下一個交易日"
+                "（交給下次 daily 校正）"
+            )
+            return
+        if find_consensus_prev_trade_date(db_url, next_date) != date:
+            print(
+                f"  大盤融資收尾校正略過：{date} 與 {next_date} 之間 DB 缺日，"
+                f"{next_date} 的前日餘額不一定是 {date} 的"
+            )
+            return
+        margin = fetch_twse_market_margin(session, next_date)
+        prev_balance = margin.get("prev_margin_balance")
+        if prev_balance is None:
+            print(f"  大盤融資收尾校正略過：{next_date} 的 MI_MARGN 沒有前日餘額")
+            return
+        _print_margin_correction(
+            correct_prev_margin_balance(db_url, next_date, prev_balance)
+        )
+    except Exception as exc:
+        print(f"  大盤融資收尾校正失敗（{date}）：{exc}")
+
+
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
     """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉 and upsert to market_daily."""
     market_data: dict = {}
 
+    # 每個子來源失敗都要印 log（README「來源失敗一律印 log」）：這些欄位寫成 NULL 之後
+    # 不會有任何流程回頭補，沒有 log 就只能事後比對 DEV／PROD 才發現。
     try:
         ohlc_map = fetch_twse_taiex_ohlc(session, date)
         if date in ohlc_map:
             market_data.update(ohlc_map[date])
+        else:
+            print(f"  大盤 OHLC 取得失敗：MI_5MINS_HIST 月表沒有 {date}")
     except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  大盤 OHLC 取得失敗：{exc}")
 
@@ -2896,24 +2959,24 @@ def _fetch_and_upsert_market_daily(
         vol_map = fetch_twse_market_volume(session, date)
         if date in vol_map:
             market_data["total_volume"] = vol_map[date]
+        else:
+            print(f"  大盤成交金額取得失敗：FMTQIK 月表沒有 {date}")
     except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  大盤成交金額取得失敗：{exc}")
 
     try:
-        foreign = fetch_twse_foreign_net(session, date)
-        if foreign is not None:
-            market_data["foreign_net"] = foreign
-    except requests.RequestException as exc:
+        market_data["foreign_net"] = fetch_twse_foreign_net(session, date)
+    except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  大盤外資買賣超取得失敗：{exc}")
 
+    # MI_MARGN 失敗時 D-1 校正也一併跳過（prev_margin_balance 拿不到）。
     prev_margin_balance: int | None = None
     try:
         margin = fetch_twse_market_margin(session, date)
-        if margin:
-            prev_margin_balance = margin.pop("prev_margin_balance", None)
-            market_data.update(margin)
-    except requests.RequestException as exc:
-        print(f"  大盤融資餘額取得失敗：{exc}")
+        prev_margin_balance = margin.pop("prev_margin_balance", None)
+        market_data.update(margin)
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"  大盤融資餘額取得失敗（D-1 校正一併跳過）：{exc}")
 
     # 期交所台指期三大法人未平倉（不同站，不受 TWSE pacing 影響）。休市、尚未公布、
     # 表頭改版都是 DataUnavailableError：只是這幾欄不寫，不影響其他來源。
@@ -2926,20 +2989,9 @@ def _fetch_and_upsert_market_daily(
 
     if prev_margin_balance is not None:
         try:
-            result = correct_prev_margin_balance(
-                config.database_url, date, prev_margin_balance
+            _print_margin_correction(
+                correct_prev_margin_balance(config.database_url, date, prev_margin_balance)
             )
-            if result is not None:
-                prev_date, old_balance, new_balance, old_change, new_change = result
-                old_bal_str = "NULL" if old_balance is None else f"{old_balance:,}"
-                old_chg_str = "NULL" if old_change is None else f"{old_change:,}"
-                new_chg_str = "NULL" if new_change is None else f"{new_change:,}"
-                print(
-                    f"  大盤 D-1 ({prev_date}) margin_balance 修正："
-                    f"舊={old_bal_str} → 新={new_balance:,}；"
-                    f"margin_balance_change：舊={old_chg_str} → 新={new_chg_str} "
-                    "(TWSE 事後修正)"
-                )
         except Exception as exc:
             print(f"  大盤 D-1 margin_balance 校正失敗：{exc}")
 
@@ -3164,7 +3216,7 @@ def _main_inner(
             disposition = _fetch_disposition(session, start_date, end_date)
 
         sheet_names = set()
-        any_written = False
+        last_written: dt.date | None = None
         for date in backfill_dates:
             if _run_for_date(
                 session, date, holdings, sheet_names, twse_month_cache,
@@ -3176,23 +3228,29 @@ def _main_inner(
                 name_map=name_map,
                 disposition=disposition,
             ):
-                any_written = True
+                last_written = date
         # 至少寫入一天時才修正 backfill 左邊界前一天的 margin/short（範圍內已是 MoneyDJ
         # 修正版，但實際左邊界前一天不在 prefetch 範圍內，可能仍是 provisional）
         # 使用 backfill_dates[0]（_build_date_range 已正規化 reversed/one-sided 輸入）
-        if any_written:
+        if last_written is not None:
             _refresh_prev_day_margin(session, holdings, backfill_dates[0], config)
+        # 範圍內每天的大盤融資都由下一天校正，只有最後寫入的那天沒有下一天可處理。
+        if last_written is not None and last_written < today:
+            _settle_market_margin(session, config, last_written)
         return
 
     # Single date mode (today / --date)
     sheet_names = set()
-    _run_for_date(
+    written = _run_for_date(
         session, target_date, holdings, sheet_names, twse_month_cache,
         config, today,
         skip_existing=False,
         issued_shares=issued_shares,
         name_map=name_map,
     )
+    # 重跑歷史日：寫入的是當日速報餘額，要用隔日的前日餘額校正回來。今天沒有隔日。
+    if written and target_date < today:
+        _settle_market_margin(session, config, target_date)
 
 
 if __name__ == "__main__":
