@@ -2879,6 +2879,24 @@ def _refresh_prev_day_margin(
     )
 
 
+def _print_margin_correction(
+    result: tuple[dt.date, int | None, int, int | None, int | None] | None,
+) -> None:
+    """印出 correct_prev_margin_balance 的修正結果；None（不需修正）不印。"""
+    if result is None:
+        return
+    prev_date, old_balance, new_balance, old_change, new_change = result
+    old_bal_str = "NULL" if old_balance is None else f"{old_balance:,}"
+    old_chg_str = "NULL" if old_change is None else f"{old_change:,}"
+    new_chg_str = "NULL" if new_change is None else f"{new_change:,}"
+    print(
+        f"  大盤 D-1 ({prev_date}) margin_balance 修正："
+        f"舊={old_bal_str} → 新={new_balance:,}；"
+        f"margin_balance_change：舊={old_chg_str} → 新={new_chg_str} "
+        "(TWSE 事後修正)"
+    )
+
+
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
@@ -2926,20 +2944,9 @@ def _fetch_and_upsert_market_daily(
 
     if prev_margin_balance is not None:
         try:
-            result = correct_prev_margin_balance(
-                config.database_url, date, prev_margin_balance
+            _print_margin_correction(
+                correct_prev_margin_balance(config.database_url, date, prev_margin_balance)
             )
-            if result is not None:
-                prev_date, old_balance, new_balance, old_change, new_change = result
-                old_bal_str = "NULL" if old_balance is None else f"{old_balance:,}"
-                old_chg_str = "NULL" if old_change is None else f"{old_change:,}"
-                new_chg_str = "NULL" if new_change is None else f"{new_change:,}"
-                print(
-                    f"  大盤 D-1 ({prev_date}) margin_balance 修正："
-                    f"舊={old_bal_str} → 新={new_balance:,}；"
-                    f"margin_balance_change：舊={old_chg_str} → 新={new_chg_str} "
-                    "(TWSE 事後修正)"
-                )
         except Exception as exc:
             print(f"  大盤 D-1 margin_balance 校正失敗：{exc}")
 
