@@ -97,6 +97,9 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
   算出「參考價 = 收盤」的錯誤漲跌停價。另：change 的取得寫成獨立區塊，**不可**加進
   `STOCK_DAY` 逐檔月表區塊的 `any(v is None ...)` 觸發條件（那是逐檔 HTTP，
   加進去會讓每檔都多打一次 API）。
+- **重寫歷史日後要收尾校正大盤融資**（`_settle_market_margin`）：處理 D 寫入的是當日速報
+  餘額，只有處理 D+1 才校正 D，所以 `--date D` 與回補最後一天要另外用 D+1 的前日餘額校正。
+  只對最後寫入日做 1 次，**不要**改成每天都做（回補 N 天就多打 N 次 TWSE）。
 - **`--backfill-futures-oi` 只 UPDATE 不 INSERT `market_daily`**：只有期貨欄的列沒有大盤
   行情，卻會被 `find_consensus_prev_trade_date` 當成 D-1，打亂融資融券校正。期交所的錯誤
   （休市「查無資料」、超過近三年「日期時間錯誤」）都是 HTTP 200 + HTML alert，靠內容判斷。

@@ -200,3 +200,16 @@ class TestLoadMarketDatesInRange:
         sql, params = cur.executed[0]
         assert "FROM market_daily" in sql and "BETWEEN" in sql
         assert params == (dt.date(2026, 11, 1), dt.date(2026, 11, 30))
+
+
+class TestFindNextMarketTradeDate:
+    def test_returns_next_date(self, monkeypatch) -> None:
+        cur, _ = _pool(monkeypatch, fetch_results=[(dt.date(2026, 6, 23),)])
+        assert db_utils.find_next_market_trade_date(URL, dt.date(2026, 6, 22)) == dt.date(2026, 6, 23)
+        sql, params = cur.executed[0]
+        assert "MIN(trade_date) FROM market_daily WHERE trade_date > %s" in sql
+        assert params == (dt.date(2026, 6, 22),)
+
+    def test_none_when_no_later_date(self, monkeypatch) -> None:
+        _pool(monkeypatch, fetch_results=[(None,)])
+        assert db_utils.find_next_market_trade_date(URL, dt.date(2026, 11, 13)) is None

@@ -620,6 +620,19 @@ def load_market_dates_in_range(
     return {r[0] for r in rows}
 
 
+def find_next_market_trade_date(database_url: str, date: dt.date) -> dt.date | None:
+    """回傳 market_daily 在 date 之後的第一個 trade_date；沒有則 None。
+
+    重寫歷史日後的大盤融資收尾校正用：D 的餘額要以 D 下一交易日公布的前日餘額為準。
+    """
+    with _connect(database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT MIN(trade_date) FROM market_daily WHERE trade_date > %s", (date,)
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 # ---------------------------------------------------------------------------
 # stock_holder_percent (大戶 / 散戶持股佔比)
 # ---------------------------------------------------------------------------
