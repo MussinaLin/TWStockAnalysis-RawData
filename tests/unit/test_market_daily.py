@@ -110,12 +110,23 @@ class TestHappyPath:
         run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
         assert "txf_foreign_oi_net" not in _written(wiring)
 
-    def test_date_not_in_ohlc_map_is_skipped(self, monkeypatch, wiring) -> None:
-        """月表回傳的是整月，請求日不在其中時不可誤用別天的資料。"""
+    def test_date_not_in_ohlc_map_is_skipped(self, monkeypatch, capsys, wiring) -> None:
+        """月表回傳的是整月，請求日不在其中時不可誤用別天的資料，且要印 log。"""
         other = dt.date(2026, 8, 20)
         monkeypatch.setattr(run, "fetch_twse_taiex_ohlc", lambda s, d: {other: dict(OHLC)})
         run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
         assert "taiex_close" not in _written(wiring)
+        assert "大盤 OHLC" in capsys.readouterr().out
+
+    def test_date_not_in_volume_map_is_logged(self, monkeypatch, capsys, wiring) -> None:
+        monkeypatch.setattr(run, "fetch_twse_market_volume", lambda s, d: {dt.date(2026, 8, 20): 1})
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        assert "total_volume" not in _written(wiring)
+        assert "大盤成交金額" in capsys.readouterr().out
+
+    def test_happy_path_logs_no_failure(self, capsys, wiring) -> None:
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        assert "失敗" not in capsys.readouterr().out
 
 
 class TestPartialFailureIsolation:
@@ -128,6 +139,8 @@ class TestPartialFailureIsolation:
             ("fetch_twse_market_volume", DataUnavailableError("x"), "total_volume", "taiex_close"),
             ("fetch_twse_foreign_net", requests.RequestException("x"), "foreign_net", "taiex_close"),
             ("fetch_twse_market_margin", requests.RequestException("x"), "margin_balance", "taiex_close"),
+            ("fetch_twse_foreign_net", DataUnavailableError("x"), "foreign_net", "taiex_close"),
+            ("fetch_twse_market_margin", DataUnavailableError("x"), "margin_balance", "taiex_close"),
             ("fetch_taifex_txf_institutional", DataUnavailableError("查無資料"),
              "txf_foreign_oi_net", "taiex_close"),
             ("fetch_taifex_txf_institutional", requests.RequestException("x"),
@@ -148,8 +161,8 @@ class TestPartialFailureIsolation:
         for attr, exc in [
             ("fetch_twse_taiex_ohlc", DataUnavailableError("x")),
             ("fetch_twse_market_volume", DataUnavailableError("x")),
-            ("fetch_twse_foreign_net", requests.RequestException("x")),
-            ("fetch_twse_market_margin", requests.RequestException("x")),
+            ("fetch_twse_foreign_net", DataUnavailableError("x")),
+            ("fetch_twse_market_margin", DataUnavailableError("x")),
             ("fetch_taifex_txf_institutional", DataUnavailableError("x")),
         ]:
             # exc 綁進預設參數：直接閉包會晚綁定，每個來源都丟最後一個例外。
@@ -159,15 +172,27 @@ class TestPartialFailureIsolation:
         run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
         assert wiring["upserts"] == []
 
-    def test_foreign_net_none_is_not_written(self, monkeypatch, wiring) -> None:
-        monkeypatch.setattr(run, "fetch_twse_foreign_net", lambda s, d: None)
+    def test_foreign_net_unavailable_is_logged_with_reason(self, monkeypatch, capsys, wiring) -> None:
+        """BFI82U 失敗原本靜默回 None；限流字串要印出來才查得到。"""
+        def fail(s, d):
+            raise DataUnavailableError("BFI82U：很抱歉，沒有符合條件的資料!")
+        monkeypatch.setattr(run, "fetch_twse_foreign_net", fail)
         run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
         assert "foreign_net" not in _written(wiring)
+        out = capsys.readouterr().out
+        assert "大盤外資買賣超取得失敗" in out and "很抱歉" in out
 
-    def test_empty_margin_payload_skips_correction(self, monkeypatch, wiring) -> None:
-        monkeypatch.setattr(run, "fetch_twse_market_margin", lambda s, d: {})
+    def test_margin_unavailable_is_logged_and_skips_correction(
+        self, monkeypatch, capsys, wiring
+    ) -> None:
+        """MI_MARGN 失敗會連帶跳過 D-1 校正，必須留下 log。"""
+        def fail(s, d):
+            raise DataUnavailableError("MI_MARGN：很抱歉，沒有符合條件的資料!")
+        monkeypatch.setattr(run, "fetch_twse_market_margin", fail)
         run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
         assert wiring["corrections"] == []
+        out = capsys.readouterr().out
+        assert "大盤融資餘額取得失敗" in out and "很抱歉" in out
 
 
     def test_futures_oi_format_change_does_not_block_others(self, monkeypatch, wiring) -> None:

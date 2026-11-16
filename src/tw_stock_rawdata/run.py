@@ -2903,10 +2903,14 @@ def _fetch_and_upsert_market_daily(
     """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉 and upsert to market_daily."""
     market_data: dict = {}
 
+    # 每個子來源失敗都要印 log（README「來源失敗一律印 log」）：這些欄位寫成 NULL 之後
+    # 不會有任何流程回頭補，沒有 log 就只能事後比對 DEV／PROD 才發現。
     try:
         ohlc_map = fetch_twse_taiex_ohlc(session, date)
         if date in ohlc_map:
             market_data.update(ohlc_map[date])
+        else:
+            print(f"  大盤 OHLC 取得失敗：MI_5MINS_HIST 月表沒有 {date}")
     except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  大盤 OHLC 取得失敗：{exc}")
 
@@ -2914,24 +2918,24 @@ def _fetch_and_upsert_market_daily(
         vol_map = fetch_twse_market_volume(session, date)
         if date in vol_map:
             market_data["total_volume"] = vol_map[date]
+        else:
+            print(f"  大盤成交金額取得失敗：FMTQIK 月表沒有 {date}")
     except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  大盤成交金額取得失敗：{exc}")
 
     try:
-        foreign = fetch_twse_foreign_net(session, date)
-        if foreign is not None:
-            market_data["foreign_net"] = foreign
-    except requests.RequestException as exc:
+        market_data["foreign_net"] = fetch_twse_foreign_net(session, date)
+    except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  大盤外資買賣超取得失敗：{exc}")
 
+    # MI_MARGN 失敗時 D-1 校正也一併跳過（prev_margin_balance 拿不到）。
     prev_margin_balance: int | None = None
     try:
         margin = fetch_twse_market_margin(session, date)
-        if margin:
-            prev_margin_balance = margin.pop("prev_margin_balance", None)
-            market_data.update(margin)
-    except requests.RequestException as exc:
-        print(f"  大盤融資餘額取得失敗：{exc}")
+        prev_margin_balance = margin.pop("prev_margin_balance", None)
+        market_data.update(margin)
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"  大盤融資餘額取得失敗（D-1 校正一併跳過）：{exc}")
 
     # 期交所台指期三大法人未平倉（不同站，不受 TWSE pacing 影響）。休市、尚未公布、
     # 表頭改版都是 DataUnavailableError：只是這幾欄不寫，不影響其他來源。
