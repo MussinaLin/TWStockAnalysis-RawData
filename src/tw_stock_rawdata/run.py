@@ -22,6 +22,7 @@ from .db_utils import (
     find_consensus_prev_trade_date,
     get_config_value,
     get_enabled_stocks,
+    load_market_dates_in_range,
     load_market_types,
     load_stock_names,
     load_stock_shares,
@@ -31,6 +32,7 @@ from .db_utils import (
     update_prev_day_margin_batch,
     update_price_limits_batch,
     update_margin_batch,
+    update_market_futures_oi_batch,
     update_trust_holding_batch,
     upsert_daily_raw,
     upsert_holder_percent,
@@ -362,6 +364,7 @@ def _is_daily_mode(args: argparse.Namespace) -> bool:
         or args.backfill_disposition
         or args.backfill_trust_holding
         or args.backfill_margin
+        or args.backfill_futures_oi
         or args.update_shares
         or args.dahu
     )
@@ -415,6 +418,12 @@ def _parse_args() -> argparse.Namespace:
         help="只回補 9 個融資融券欄位，來源為交易所逐日整批（TWSE MI_MARGN／TPEX V2），"
              "餘額以隔日公布的前日餘額為準"
              "（需搭配 --backfill-start / --backfill-end，可選 --backfill-stocks）",
+    )
+    parser.add_argument(
+        "--backfill-futures-oi", action="store_true",
+        help="只回補 market_daily 的台指期（大台）三大法人未平倉淨額 8 欄，"
+             "期交所整段 1 次請求、只更新已存在的列、只提供近三年"
+             "（需搭配 --backfill-start / --backfill-end）",
     )
     parser.add_argument(
         "--update-shares", action="store_true",
@@ -1172,6 +1181,64 @@ def _backfill_margin_command(
         print(f"ℹ 以下保留交易所當日餘額、未以隔日前日餘額校正：{'、'.join(unsettled)}")
     if problems:
         print(f"⚠ 未回補的日期／市場（可縮小範圍重跑）：{'、'.join(problems)}")
+
+
+def _backfill_futures_oi_command(
+    session: requests.Session,
+    config: AppConfig,
+    args: argparse.Namespace,
+) -> None:
+    """--backfill-futures-oi：只回補 market_daily 的 8 個台指期三大法人未平倉欄。
+
+    期交所下載端點吃日期區間，整段只打一發：範圍取區間內 market_daily 已有列的
+    最早～最晚日。該端點只保留近三年，而近三年整段一發實測回得完，所以不切窗口。
+
+    只 UPDATE 已存在的列、不 INSERT（見 update_market_futures_oi_batch）。兩邊日期
+    對不上的都列出來：DB 有期交所沒有（可能是期交所缺資料或休市認定不同）、
+    期交所有 DB 沒有（該日 market_daily 尚未寫入，先跑一般回補再重跑這個）。
+    """
+    ignored = [
+        name
+        for name, val in [("--backfill-stocks", args.backfill_stocks), ("--date", args.date)]
+        if val
+    ]
+    if ignored:
+        print(f"警告：--backfill-futures-oi 是大盤層級資料，{'、'.join(ignored)} 將被忽略")
+
+    if not args.backfill_start or not args.backfill_end:
+        print("錯誤：--backfill-futures-oi 需搭配 --backfill-start 和 --backfill-end")
+        return
+
+    dates = _build_date_range(
+        _parse_date(args.backfill_start), _parse_date(args.backfill_end)
+    )
+    start, end = dates[0], dates[-1]
+    on_db = load_market_dates_in_range(config.database_url, start, end)
+    if not on_db:
+        print(f"{start} ~ {end} market_daily 無資料，略過")
+        return
+
+    lo, hi = min(on_db), max(on_db)
+    print(f"回補台指期三大法人未平倉 {lo} ~ {hi}（market_daily 共 {len(on_db)} 天，期交所 1 次請求）")
+    try:
+        oi_map = prepare_taifex_txf_oi(fetch_taifex_txf_institutional(session, lo, hi))
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"錯誤：期交所台指期三大法人未平倉取得失敗，未回補：{exc}")
+        return
+
+    updates = [(d, oi_map[d]) for d in sorted(on_db) if d in oi_map]
+    n_updated = update_market_futures_oi_batch(config.database_url, updates)
+    print(f"台指期三大法人未平倉回補完成，共更新 {n_updated} 列")
+
+    not_on_taifex = sorted(on_db - oi_map.keys())
+    not_on_db = sorted(d for d in oi_map if lo <= d <= hi and d not in on_db)
+    if not_on_taifex:
+        print(f"⚠ market_daily 有、期交所沒有，未回補：{'、'.join(map(str, not_on_taifex))}")
+    if not_on_db:
+        print(
+            f"ℹ 期交所有、market_daily 沒有，未寫入（不新增列）："
+            f"{'、'.join(map(str, not_on_db))}"
+        )
 
 
 class RowSourceProvider(Protocol):
@@ -2955,6 +3022,11 @@ def _main_inner(
     # --backfill-margin mode：只回補 9 個融資融券欄位
     if args.backfill_margin:
         _backfill_margin_command(session, config, args)
+        return
+
+    # --backfill-futures-oi mode：只回補 market_daily 的 8 個台指期未平倉欄
+    if args.backfill_futures_oi:
+        _backfill_futures_oi_command(session, config, args)
         return
 
     # --backfill-stocks mode
