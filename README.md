@@ -280,8 +280,8 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
   最後一筆不是收盤）。
 - **不可改用月檔做 daily**：月檔在收盤後數小時內還沒有當日列（2026-11-23 15:29 實測）。
 - 檔案是 cp950、tab 分隔、行尾 CRLF／LF 混用；錯誤頁是 HTML，丟 `DataUnavailableError`。
-- **歷史只有近 4 個月**：期交所月檔只保留近 4 個月，更早的要走期交所「交易歷史資料申請」或其他網站，
-  `market_daily` 在那之前的 `tw_vix_close` 為 `NULL`。
+- **月檔只有近 4 個月**：更早的歷史用一次性的 `tools/backfill_vix_history.py` 從期交所指數專區補
+  （見下）。
 - **當日檔也只保留近期**：舊日期（2024-01-02、2026-07-03，2026-11-23 實測）直接回 HTTP 200 + HTML
   （不轉址），立即 `DataUnavailableError`、不重試。所以 `--date` 或一般區間回補舊日期時，每天只多
   1 次期交所請求、不會卡在重試，`tw_vix_close` 留 `NULL`。
@@ -294,6 +294,27 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
   後繼續下一個月。
 - **只 UPDATE 已存在的列、不 INSERT**（理由同 `--backfill-futures-oi`）；來源 `NULL` 不覆寫。
   收尾列出兩邊對不上的日期。`--backfill-stocks`、`--date` 會被忽略並印警告。結果冪等。
+
+#### 歷史 VIX 一次性回補（tools/backfill_vix_history.py）
+
+月檔涵蓋不到的歷史，從期交所「指數專區」圖表背後的端點補
+（`POST https://www.taifex.com.tw/indes/index.aspx/GetStockDayPrices`，`syid=TAIWANVIX`），
+整段 1 次請求。
+
+```bash
+# 預設只模擬：印目標 DB host、將寫入天數、對不上的日期
+python tools/backfill_vix_history.py --start 2022-01-01 --end 2026-11-20
+# 確認目標 DB 後才寫
+python tools/backfill_vix_history.py --start 2022-01-01 --end 2026-11-20 --apply
+```
+
+- **只補 `tw_vix_close IS NULL` 的列，不覆蓋、不 INSERT。** 指數專區偶爾沿用前一天的值：
+  2026-08-14 回 31.09（= 08-13 的值），月檔實際是 30.22。所以它的可信度排在當日檔、月檔之後，
+  既有值一律不動，與既有值不同的日期只列出來。
+- 網頁寫「可查詢最近三年」只是日期選擇器的限制，端點實測可回 2022-01-03（DEV 的最早日）。
+- 2026-11-23 與 DEV 的月檔值逐日比對：75 天中 74 天相同，唯一不同就是上面的 08-14。
+- 與前一交易日同值、無法查證的日期照寫並印 `⚠`（2022-08-18、2023-09-20、2026-06-18）。
+- 目標 DB 取 `DATABASE_URL`（已 export 的優先，沒有才讀 `.env`）。結果冪等，重跑只會寫 0 列。
 
 #### 上市大盤當沖統計（day_trade_*）
 
