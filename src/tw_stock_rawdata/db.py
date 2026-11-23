@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS market_daily (
     txf_dealer_oi_net_amount   BIGINT,
     txf_total_oi_net           BIGINT,
     txf_total_oi_net_amount    BIGINT,
+    tw_vix_close               NUMERIC(8,2),
     created_time          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_time          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -153,6 +154,9 @@ ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_dealer_oi_net         BIGI
 ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_dealer_oi_net_amount  BIGINT;
 ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_total_oi_net          BIGINT;
 ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_total_oi_net_amount   BIGINT;
+-- tw_vix_close：台指 VIX（臺指選擇權波動率指數，期交所編製）13:45 收盤值。
+-- daily 取期交所當日檔；--backfill-vix 取月檔（期交所只保留近 4 個月）。
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS tw_vix_close NUMERIC(8,2);
 
 -- stock_holder_percent (大戶 / 散戶持股佔比)
 -- 資料來源：TDCC 集保戶股權分散表，每週更新一次（trade_date 為週五結算日）。

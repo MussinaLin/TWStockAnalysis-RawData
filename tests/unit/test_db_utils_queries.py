@@ -152,6 +152,14 @@ class TestUpsertMarketDaily:
             assert f"{col} = COALESCE(EXCLUDED.{col}, market_daily.{col})" in sql
 
 
+    def test_vix_column_is_written_with_coalesce(self, monkeypatch) -> None:
+        cur, _ = _pool(monkeypatch)
+        db_utils.upsert_market_daily(URL, dt.date(2026, 11, 20), {"tw_vix_close": 52.13})
+        sql, params = cur.executed[0]
+        assert params["tw_vix_close"] == 52.13
+        assert "tw_vix_close = COALESCE(EXCLUDED.tw_vix_close, market_daily.tw_vix_close)" in sql
+
+
 FUTURES_OI_COLS = [
     f"txf_{who}_oi_net{suffix}"
     for who in ("foreign", "trust", "dealer", "total")
@@ -211,6 +219,21 @@ class TestUpdateMarketColumnsBatch:
         assert db_utils._update_market_columns_batch(URL, {"a": "bigint"}, []) == 0
         assert cur.executed == []
         assert not conn.committed
+
+
+class TestUpdateMarketVixBatch:
+    def test_updates_vix_as_numeric_without_insert(self, monkeypatch) -> None:
+        cur, conn = _pool(monkeypatch, rowcounts=[1])
+        n = db_utils.update_market_vix_batch(
+            URL, [(dt.date(2026, 11, 20), {"tw_vix_close": 52.13})]
+        )
+        assert n == 1
+        sql, params = cur.executed[0]
+        assert "(%s::date, %s::numeric)" in sql
+        assert "tw_vix_close = COALESCE(v.tw_vix_close, t.tw_vix_close)" in sql
+        assert "INSERT" not in sql
+        assert params == [dt.date(2026, 11, 20), 52.13]
+        assert conn.committed
 
 
 class TestLoadMarketDatesInRange:

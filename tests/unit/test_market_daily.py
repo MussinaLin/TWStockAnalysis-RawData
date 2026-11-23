@@ -55,6 +55,7 @@ def wiring(monkeypatch):
         return _taifex_df()
 
     monkeypatch.setattr(run, "fetch_taifex_txf_institutional", fake_taifex)
+    monkeypatch.setattr(run, "fetch_taifex_vix_close", lambda s, d: 52.13)
 
     def fake_correct(url, date, prev_balance):
         calls["corrections"].append((date, prev_balance))
@@ -124,6 +125,21 @@ class TestHappyPath:
         assert "total_volume" not in _written(wiring)
         assert "大盤成交金額" in capsys.readouterr().out
 
+    def test_vix_merged_into_same_upsert(self, wiring) -> None:
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        assert _written(wiring)["tw_vix_close"] == 52.13
+
+    def test_vix_failure_is_logged_and_keeps_others(self, monkeypatch, capsys, wiring) -> None:
+        def fail(session, date):
+            raise DataUnavailableError("x")
+
+        monkeypatch.setattr(run, "fetch_taifex_vix_close", fail)
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        data = _written(wiring)
+        assert "tw_vix_close" not in data
+        assert data["taiex_close"] == 24100.0
+        assert "台指 VIX 取得失敗：x" in capsys.readouterr().out
+
     def test_happy_path_logs_no_failure(self, capsys, wiring) -> None:
         run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
         assert "失敗" not in capsys.readouterr().out
@@ -164,6 +180,7 @@ class TestPartialFailureIsolation:
             ("fetch_twse_foreign_net", DataUnavailableError("x")),
             ("fetch_twse_market_margin", DataUnavailableError("x")),
             ("fetch_taifex_txf_institutional", DataUnavailableError("x")),
+            ("fetch_taifex_vix_close", DataUnavailableError("x")),
         ]:
             # exc 綁進預設參數：直接閉包會晚綁定，每個來源都丟最後一個例外。
             monkeypatch.setattr(

@@ -530,6 +530,9 @@ _FUTURES_OI_COLS = [
     for suffix in ("", "_amount")
 ]
 
+# 台指 VIX 收盤值（欄名 → PG 型別，給 _update_market_columns_batch 的 cast 用）。
+_VIX_COL_TYPES: dict[str, str] = {"tw_vix_close": "numeric"}
+
 
 def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> None:
     """Upsert a single row into market_daily table.
@@ -539,13 +542,14 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         trade_date: The trading date.
         data: dict with keys: taiex_open, taiex_high, taiex_low, taiex_close,
               total_volume, margin_balance, margin_balance_change, foreign_net,
-              以及 `_FUTURES_OI_COLS` 的台指期未平倉欄。
+              以及 `_FUTURES_OI_COLS` 的台指期未平倉欄、`_VIX_COL_TYPES` 的台指 VIX 欄。
     """
     row = {"trade_date": trade_date, **data}
     cols = [
         "trade_date", "taiex_open", "taiex_high", "taiex_low", "taiex_close",
         "total_volume", "margin_balance", "margin_balance_change", "foreign_net",
         *_FUTURES_OI_COLS,
+        *_VIX_COL_TYPES,
     ]
     # Only include columns that exist in data
     row = {c: row.get(c) for c in cols}
@@ -584,6 +588,18 @@ def update_market_futures_oi_batch(
     return _update_market_columns_batch(
         database_url, {c: "bigint" for c in _FUTURES_OI_COLS}, updates
     )
+
+
+def update_market_vix_batch(
+    database_url: str,
+    updates: list[tuple[dt.date, dict]],
+) -> int:
+    """批次覆寫 market_daily 的台指 VIX 收盤值（--backfill-vix 用）。
+
+    只 UPDATE 已存在的 row、不 INSERT，理由同 `update_market_futures_oi_batch`。
+    updates 的 data_dict 鍵為 `tw_vix_close`。
+    """
+    return _update_market_columns_batch(database_url, _VIX_COL_TYPES, updates)
 
 
 def _update_market_columns_batch(

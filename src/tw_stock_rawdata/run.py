@@ -67,6 +67,7 @@ from .sources import (
     build_session,
     fetch_moneydj_holding_pct,
     fetch_taifex_txf_institutional,
+    fetch_taifex_vix_close,
     fetch_moneydj_margin,
     fetch_tdcc_distribution,
     fetch_tdcc_token_and_dates,
@@ -2946,7 +2947,7 @@ def _settle_market_margin(
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
-    """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉 and upsert to market_daily."""
+    """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉, 台指 VIX and upsert to market_daily."""
     market_data: dict = {}
 
     # 每個子來源失敗都要印 log（README「來源失敗一律印 log」）：這些欄位寫成 NULL 之後
@@ -2991,6 +2992,12 @@ def _fetch_and_upsert_market_daily(
             market_data.update(oi_map[date])
     except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  台指期三大法人未平倉取得失敗：{exc}")
+
+    # 期交所台指 VIX 13:45 收盤值（當日檔，收盤後即有）。
+    try:
+        market_data["tw_vix_close"] = fetch_taifex_vix_close(session, date)
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"  台指 VIX 取得失敗：{exc}")
 
     if prev_margin_balance is not None:
         try:
