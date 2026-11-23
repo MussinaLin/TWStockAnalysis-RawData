@@ -1311,6 +1311,10 @@ def fetch_twse_day_trade(
     """
     params = {"date": date.strftime("%Y%m%d"), "selectType": "All", "response": "json"}
     payload = _http_get(session, TWSE_DAY_TRADE_URL, params).json()
+    # 形狀檢查一律轉成 DataUnavailableError：AttributeError／TypeError 會繞過 daily 的
+    # except，讓當天整列 market_daily 寫不進去。
+    if not isinstance(payload, dict):
+        raise DataUnavailableError(f"TWTB4U 回傳不是物件：{type(payload).__name__}")
     if payload.get("stat") != "OK":
         raise DataUnavailableError(f"TWTB4U：{payload.get('stat') or '回傳異常'}")
 
@@ -1318,9 +1322,10 @@ def fetch_twse_day_trade(
     if data_date != date:
         raise DataUnavailableError(f"TWTB4U 資料日期 {data_date} 不是請求日 {date}")
 
+    tables = payload.get("tables")
     table = next(
-        (t for t in payload.get("tables") or []
-         if "當日沖銷交易統計資訊" in str(t.get("title", ""))),
+        (t for t in (tables if isinstance(tables, list) else [])
+         if isinstance(t, dict) and "當日沖銷交易統計資訊" in str(t.get("title", ""))),
         None,
     )
     if table is None:
@@ -1329,8 +1334,11 @@ def fetch_twse_day_trade(
     expected = [name for name, _ in _DAY_TRADE_FIELDS]
     if table.get("fields") != expected:
         raise DataUnavailableError(f"TWTB4U 統計表表頭改版：{table.get('fields')!r}")
-    rows = table.get("data") or []
-    if len(rows) != 1 or len(rows[0]) != len(expected):
+    rows = table.get("data")
+    if not (
+        isinstance(rows, list) and len(rows) == 1
+        and isinstance(rows[0], list) and len(rows[0]) == len(expected)
+    ):
         raise DataUnavailableError(f"TWTB4U 統計表應為 1 列 {len(expected)} 欄，實際 {rows!r}")
 
     result: dict[str, int | float | None] = {}

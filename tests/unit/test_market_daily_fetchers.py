@@ -162,3 +162,25 @@ class TestFetchTwseDayTrade:
         assert out["day_trade_buy_amount"] == 322561954550
         assert out["day_trade_sell_amount"] == 322720245100
         assert out["day_trade_sell_amount_pct"] == pytest.approx(0.3450)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda p: p.update(tables={"title": "x"}),
+            lambda p: p.update(tables=["not a dict"]),
+            lambda p: p["tables"][0].update(data=[None]),
+            lambda p: p["tables"][0].update(data="oops"),
+        ],
+    )
+    def test_malformed_payload_raises_data_unavailable(self, mutate) -> None:
+        """回應形狀異常也只能是 DataUnavailableError：其他例外會繞過 daily 的 except，
+        讓當天整列 market_daily 寫不進去（spec 反目標第一條）。"""
+        payload = _day_trade_payload()
+        mutate(payload)
+        with pytest.raises(DataUnavailableError):
+            fetch_twse_day_trade(FakeSession(payload=payload), DAY_TRADE_DATE)
+
+    @pytest.mark.parametrize("payload", [[], "oops", None])
+    def test_non_dict_payload_raises_data_unavailable(self, payload) -> None:
+        with pytest.raises(DataUnavailableError):
+            fetch_twse_day_trade(FakeSession(payload=payload), DAY_TRADE_DATE)
