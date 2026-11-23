@@ -34,6 +34,7 @@ from .db_utils import (
     update_price_limits_batch,
     update_margin_batch,
     update_market_futures_oi_batch,
+    update_market_vix_batch,
     update_trust_holding_batch,
     upsert_daily_raw,
     upsert_holder_percent,
@@ -68,6 +69,7 @@ from .sources import (
     fetch_moneydj_holding_pct,
     fetch_taifex_txf_institutional,
     fetch_taifex_vix_close,
+    fetch_taifex_vix_month,
     fetch_moneydj_margin,
     fetch_tdcc_distribution,
     fetch_tdcc_token_and_dates,
@@ -367,6 +369,7 @@ def _is_daily_mode(args: argparse.Namespace) -> bool:
         or args.backfill_trust_holding
         or args.backfill_margin
         or args.backfill_futures_oi
+        or args.backfill_vix
         or args.update_shares
         or args.dahu
     )
@@ -426,6 +429,11 @@ def _parse_args() -> argparse.Namespace:
         help="只回補 market_daily 的台指期（大台）三大法人未平倉淨額 8 欄，"
              "期交所整段 1 次請求、只更新已存在的列、只提供近三年"
              "（需搭配 --backfill-start / --backfill-end）",
+    )
+    parser.add_argument(
+        "--backfill-vix", action="store_true",
+        help="只回補 market_daily 的台指 VIX 收盤值，期交所只提供近 4 個月、每月 1 次請求、"
+             "只更新已存在的列（需搭配 --backfill-start / --backfill-end）",
     )
     parser.add_argument(
         "--update-shares", action="store_true",
@@ -1235,6 +1243,70 @@ def _backfill_futures_oi_command(
 
     not_on_taifex = sorted(on_db - oi_map.keys())
     not_on_db = sorted(d for d in oi_map if lo <= d <= hi and d not in on_db)
+    if not_on_taifex:
+        print(f"⚠ market_daily 有、期交所沒有，未回補：{'、'.join(map(str, not_on_taifex))}")
+    if not_on_db:
+        print(
+            f"ℹ 期交所有、market_daily 沒有，未寫入（不新增列）："
+            f"{'、'.join(map(str, not_on_db))}"
+        )
+
+
+def _backfill_vix_command(
+    session: requests.Session,
+    config: AppConfig,
+    args: argparse.Namespace,
+) -> None:
+    """--backfill-vix：只回補 market_daily 的台指 VIX 收盤值（tw_vix_close）。
+
+    期交所月檔每月 1 次請求、只保留近 4 個月：按區間內 market_daily 已有日期涵蓋的
+    月份逐月抓，某月抓不到（太舊、HTML 錯誤頁、連線失敗）印警告後繼續下一個月。
+
+    只 UPDATE 已存在的列、不 INSERT（見 update_market_vix_batch）。兩邊日期對不上的
+    都列出來（同 --backfill-futures-oi）；抓不到的月份不算進「期交所沒有」。
+    """
+    ignored = [
+        name
+        for name, val in [("--backfill-stocks", args.backfill_stocks), ("--date", args.date)]
+        if val
+    ]
+    if ignored:
+        print(f"警告：--backfill-vix 是大盤層級資料，{'、'.join(ignored)} 將被忽略")
+
+    if not args.backfill_start or not args.backfill_end:
+        print("錯誤：--backfill-vix 需搭配 --backfill-start 和 --backfill-end")
+        return
+
+    dates = _build_date_range(
+        _parse_date(args.backfill_start), _parse_date(args.backfill_end)
+    )
+    start, end = dates[0], dates[-1]
+    on_db = load_market_dates_in_range(config.database_url, start, end)
+    if not on_db:
+        print(f"{start} ~ {end} market_daily 無資料，略過")
+        return
+
+    months = sorted({d.replace(day=1) for d in on_db})
+    print(f"回補台指 VIX {min(on_db)} ~ {max(on_db)}（market_daily 共 {len(on_db)} 天，"
+          f"期交所 {len(months)} 次請求）")
+
+    vix: dict[dt.date, float] = {}
+    fetched_months: set[dt.date] = set()
+    for month in months:
+        try:
+            vix.update(fetch_taifex_vix_month(session, month))
+            fetched_months.add(month)
+        except (DataUnavailableError, requests.RequestException) as exc:
+            print(f"⚠ {month:%Y-%m} 台指 VIX 月檔取得失敗，該月未回補：{exc}")
+
+    updates = [(d, {"tw_vix_close": vix[d]}) for d in sorted(on_db) if d in vix]
+    n_updated = update_market_vix_batch(config.database_url, updates)
+    print(f"台指 VIX 回補完成，共更新 {n_updated} 列")
+
+    not_on_taifex = sorted(
+        d for d in on_db if d.replace(day=1) in fetched_months and d not in vix
+    )
+    not_on_db = sorted(d for d in vix if start <= d <= end and d not in on_db)
     if not_on_taifex:
         print(f"⚠ market_daily 有、期交所沒有，未回補：{'、'.join(map(str, not_on_taifex))}")
     if not_on_db:
@@ -3091,6 +3163,11 @@ def _main_inner(
     # --backfill-futures-oi mode：只回補 market_daily 的 8 個台指期未平倉欄
     if args.backfill_futures_oi:
         _backfill_futures_oi_command(session, config, args)
+        return
+
+    # --backfill-vix mode：只回補 market_daily 的台指 VIX 收盤值
+    if args.backfill_vix:
+        _backfill_vix_command(session, config, args)
         return
 
     # --backfill-stocks mode

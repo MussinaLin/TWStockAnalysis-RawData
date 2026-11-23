@@ -1,6 +1,6 @@
 # TWStockAnalysis-RawData
 
-每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情、台指期三大法人未平倉），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
+每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情、台指期三大法人未平倉、台指 VIX），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
 
 ## 職責邊界
 
@@ -69,6 +69,9 @@ tw-stock-rawdata --backfill-margin --backfill-start 2026-04-07 --backfill-end 20
 
 # 只回補 market_daily 的台指期三大法人未平倉 8 欄（期交所整段 1 次請求，只提供近三年）
 tw-stock-rawdata --backfill-futures-oi --backfill-start 2025-01-01 --backfill-end 2026-11-16
+
+# 只回補 market_daily 的台指 VIX 收盤值（期交所只提供近 4 個月，每月 1 次請求）
+tw-stock-rawdata --backfill-vix --backfill-start 2026-08-01 --backfill-end 2026-11-20
 
 # 強制覆蓋既有資料
 tw-stock-rawdata --backfill-start ... --backfill-end ... --force
@@ -263,6 +266,32 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
   （未回補）；期交所有、`market_daily` 沒有（未寫入，先跑一般回補再重跑這個）。
 - `--backfill-stocks`、`--date` 會被忽略並印警告（大盤層級資料）。結果冪等，可重複執行。
 
+### 台指 VIX 與大盤當沖（market_daily）
+
+兩者都是「大盤見頂」的參考指標，併入 `market_daily` 的 daily 抓取，與其他子來源各自獨立失敗
+（失敗只是這幾欄留 `NULL` 並印 log）。daily、`--date`、一般區間回補都會寫；`--backfill-stocks`
+不寫 `market_daily`。
+
+#### 台指 VIX（tw_vix_close）
+
+- 臺指選擇權波動率指數（期交所編製）的 **13:45 收盤值**。期交所另有「收盤前 1 分鐘平均」，不存。
+- **daily 用當日檔**（`GET https://www.taifex.com.tw/cht/7/getVixData?filesname=YYYYMMDD`，逐 15 秒
+  tick），取 `13450000` 那一列；找不到就寫 `NULL`，**不**退而取最後一筆 tick（盤中抓到的不完整檔案，
+  最後一筆不是收盤）。
+- **不可改用月檔做 daily**：月檔在收盤後數小時內還沒有當日列（2026-11-23 15:29 實測）。
+- 檔案是 cp950、tab 分隔、行尾 CRLF／LF 混用；錯誤頁是 HTML，丟 `DataUnavailableError`。
+- **歷史只有近 4 個月**：期交所月檔只保留近 4 個月，更早的要走期交所「交易歷史資料申請」或其他網站，
+  `market_daily` 在那之前的 `tw_vix_close` 為 `NULL`。
+
+#### 只回補台指 VIX（--backfill-vix）
+
+- 來源是期交所月檔（`/file/taifex/Dailydownload/vix/log2data/YYYYMMnew.txt`），按區間內
+  `market_daily` **已有列**涵蓋的月份，**每月 1 次**請求。
+- 過期月份會 302 到 `404.htm`（最終仍是 HTTP 200 + HTML），印 `⚠ YYYY-MM 台指 VIX 月檔取得失敗`
+  後繼續下一個月。
+- **只 UPDATE 已存在的列、不 INSERT**（理由同 `--backfill-futures-oi`）；來源 `NULL` 不覆寫。
+  收尾列出兩邊對不上的日期。`--backfill-stocks`、`--date` 會被忽略並印警告。結果冪等。
+
 ### 回補特定股票（--backfill-stocks）
 
 `--backfill-stocks` 走 **per-stock 區間抓取**，與其他回補模式的成本結構不同：
@@ -382,8 +411,8 @@ HTML 頁面（MoneyDJ 融資融券／法人持股、TDCC 集保分布）的 `pd.
 - 歷史單日回補（無 cache）的 MoneyDJ 融資融券：`{symbol} 融資融券取得失敗：{原因}`。
 - OHLCV fallback 鏈最後一環 `STOCK_DAY` 月表：`{symbol} STOCK_DAY 月表取得失敗：{原因}`
   （該檔 OHLCV 缺值寫 `NULL`）。
-- `market_daily` 的 5 個子來源各自印 `大盤 OHLC／大盤成交金額／大盤外資買賣超／大盤融資餘額／
-  台指期三大法人未平倉 取得失敗：{原因}`。包含「月表抓到了但沒有當日」（`MI_5MINS_HIST`、
+- `market_daily` 的子來源各自印 `大盤 OHLC／大盤成交金額／大盤外資買賣超／大盤融資餘額／
+  台指期三大法人未平倉／台指 VIX 取得失敗：{原因}`。包含「月表抓到了但沒有當日」（`MI_5MINS_HIST`、
   `FMTQIK`）與 TWSE `stat` 不是 `OK`（`BFI82U`、`MI_MARGN`，原因帶 `stat` 原文，限流字串
   看得出來）。這些欄寫成 `NULL` 後不會有流程回頭補，`MI_MARGN` 失敗還會連帶跳過 D-1
   校正，曾因此讓 DEV／PROD 的大盤融資餘額與外資買賣超各自缺漏而無人察覺。

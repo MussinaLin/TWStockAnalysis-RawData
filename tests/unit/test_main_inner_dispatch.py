@@ -28,7 +28,7 @@ def _args(**kw) -> argparse.Namespace:
         "date": None, "backfill_start": None, "backfill_end": None,
         "backfill_stocks": None, "backfill_limits": False,
         "backfill_disposition": False, "backfill_trust_holding": False,
-        "backfill_margin": False, "backfill_futures_oi": False,
+        "backfill_margin": False, "backfill_futures_oi": False, "backfill_vix": False,
         "update_shares": False, "dahu": False,
         "force": False, "stocks": None, "from_date": None, "to_date": None,
     }
@@ -55,6 +55,7 @@ def spies(monkeypatch):
     monkeypatch.setattr(run, "_backfill_trust_holding_command", spy("backfill_trust_holding"))
     monkeypatch.setattr(run, "_backfill_margin_command", spy("backfill_margin"))
     monkeypatch.setattr(run, "_backfill_futures_oi_command", spy("backfill_futures_oi"))
+    monkeypatch.setattr(run, "_backfill_vix_command", spy("backfill_vix"))
     monkeypatch.setattr(run, "_run_for_date", spy("run_for_date", retval=True))
     monkeypatch.setattr(run, "_refresh_prev_day_margin", spy("refresh_prev_margin"))
     calls["settle_dates"] = []
@@ -97,6 +98,7 @@ class TestSubcommandRouting:
         ("backfill_trust_holding", "backfill_trust_holding"),
         ("backfill_margin", "backfill_margin"),
         ("backfill_futures_oi", "backfill_futures_oi"),
+        ("backfill_vix", "backfill_vix"),
     ])
     def test_flag_routes_and_returns(self, spies, flag, expected) -> None:
         run._main_inner(CONFIG, _args(**{flag: True}), TODAY, TODAY)

@@ -38,6 +38,7 @@ tw-stock-rawdata --backfill-disposition --backfill-start ... --backfill-end ... 
 tw-stock-rawdata --backfill-trust-holding --backfill-start ... --backfill-end ...  # 只回補投信持股比例
 tw-stock-rawdata --backfill-margin --backfill-start ... --backfill-end ...  # 只回補融資融券（交易所逐日整批；餘額以隔日前日餘額為準）
 tw-stock-rawdata --backfill-futures-oi --backfill-start ... --backfill-end ...  # 只回補台指期三大法人未平倉（期交所整段 1 發、只近三年）
+tw-stock-rawdata --backfill-vix --backfill-start ... --backfill-end ...  # 只回補台指 VIX（期交所月檔每月 1 發、只近 4 個月）
 tw-stock-rawdata --update-shares      # 只刷新 stocks.issued_shares
 
 # 測試
@@ -61,7 +62,8 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 - `stocks` — 個股 master（symbol PK、issued_shares、enabled、alpha_pick_enabled）
 - `stock_daily_raw` — 每日逐檔 raw（PK `(symbol, trade_date)`，**按年 RANGE partition**）
   含處置股註記 `is_disposition` / `disposition_match_minutes`（語意見 README）
-- `market_daily` — 大盤每日行情（trade_date PK），含台指期（大台）三大法人未平倉淨額 `txf_*`
+- `market_daily` — 大盤每日行情（trade_date PK），含台指期（大台）三大法人未平倉淨額 `txf_*`、
+  台指 VIX 收盤值 `tw_vix_close`
 
 ## Gotchas（重要不變量，改動前必讀）
 
@@ -103,3 +105,6 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 - **`--backfill-futures-oi` 只 UPDATE 不 INSERT `market_daily`**：只有期貨欄的列沒有大盤
   行情，卻會被 `find_consensus_prev_trade_date` 當成 D-1，打亂融資融券校正。期交所的錯誤
   （休市「查無資料」、超過近三年「日期時間錯誤」）都是 HTTP 200 + HTML alert，靠內容判斷。
+- **台指 VIX daily 用當日檔、不可改用月檔**：月檔在收盤後數小時內還沒有當日列。當日檔找不到
+  13:45 那一列就寫 NULL，**不要**退而取最後一筆 tick（盤中不完整的檔案最後一筆不是收盤）。
+  `--backfill-vix` 用月檔（只保留近 4 個月），同樣只 UPDATE 不 INSERT `market_daily`。
