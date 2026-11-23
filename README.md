@@ -352,6 +352,33 @@ python tools/backfill_vix_history.py --start 2022-01-01 --end 2026-11-20 --apply
       該日全部個股。
 - 歷史回補尚未提供（TWSE 2014-01-06 起都有資料）；目前只有 daily 與一般區間回補會寫。
 
+### 一次性補 market_daily 的 NULL 欄位（tools/backfill_market_nulls.py）
+
+補 `market_daily` 裡還是 `NULL` 的格子，**只補 NULL、不覆蓋、不 INSERT**（每列只帶目前是 NULL 的欄位進
+UPDATE）。分三組，可用 `--only` 分開跑：
+
+| 組 | 欄位 | 來源 | 請求數 |
+|----|------|------|--------|
+| `day-trade` | `day_trade_*` 6 欄 | TWSE TWTB4U（`fetch_twse_day_trade`） | 每天 1 次 |
+| `txf` | `txf_*` 8 欄 | FinMind `TaiwanFuturesInstitutionalInvestors`（`data_id=TX`） | 整段 1 次 |
+| `foreign-net` | `foreign_net` | TWSE BFI82U（`fetch_twse_foreign_net`） | 每天 1 次 |
+
+```bash
+python tools/backfill_market_nulls.py                          # 模擬：印目標 DB、各組缺幾天
+python tools/backfill_market_nulls.py --only txf --apply       # 寫入
+python tools/backfill_market_nulls.py --only day-trade --apply # TWSE 逐日，預設間隔 3 秒
+```
+
+- **`txf` 用第三方的原因**：期交所伺服器端只給近三年（回「無法查詢 2023/11/23 日以前資料」）。
+  2026-11-23 與 DEV 重疊的 272 天、2,176 格逐格比對 FinMind 完全一致；口數淨額 = 多 − 空未平倉口數，
+  金額淨額 = (多 − 空) 契約金額（千元）× 1000，合計欄只在三個身份別都在時才算。
+- **TWSE 限流**：要補的日期在 `market_daily` 已有列 = 確定是交易日，所以連續 3 次抓不到就當成限流、停下來。
+  每 20 天寫入一次，中斷（含 Ctrl-C）前已抓到的會先寫進去；重跑只補剩下的 NULL。
+- 模擬模式下 TWSE 逐日組不發請求（只印天數與預估時間），`txf` 會打 1 次 FinMind 以列出覆蓋情況。
+- 不處理的欄位有 NULL 時會列出來：`tw_vix_close` 走 `tools/backfill_vix_history.py`；
+  `margin_balance_change` 在 DB 第一天（沒有前一交易日）是刻意的 NULL，不補。
+- 目標 DB 取 `DATABASE_URL`（已 export 的優先，沒有才讀 `.env`）。結果冪等。
+
 ### 回補特定股票（--backfill-stocks）
 
 `--backfill-stocks` 走 **per-stock 區間抓取**，與其他回補模式的成本結構不同：
