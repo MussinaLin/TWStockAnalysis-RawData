@@ -581,11 +581,36 @@ def update_market_futures_oi_batch(
     Returns:
         實際 UPDATE 成功的 row 數合計（不存在的 trade_date 不算）。
     """
+    return _update_market_columns_batch(
+        database_url, {c: "bigint" for c in _FUTURES_OI_COLS}, updates
+    )
+
+
+def _update_market_columns_batch(
+    database_url: str,
+    col_types: dict[str, str],
+    updates: list[tuple[dt.date, dict]],
+) -> int:
+    """批次覆寫 market_daily 指定欄位：只 UPDATE 已存在的 row、新值 NULL 保留舊值。
+
+    期貨未平倉回補、VIX 回補、當沖校正共用。不 INSERT 的理由見
+    `update_market_futures_oi_batch`。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        col_types: 欄名 → PG 型別（VALUES 的 cast 用，如 "bigint"、"numeric"）；
+                   依插入順序決定 VALUES 的欄序。
+        updates: list of (trade_date, data_dict)，data_dict 缺鍵視為 NULL。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計（不存在的 trade_date 不算）。
+    """
     if not updates:
         return 0
 
-    casts = ", ".join(["%s::bigint"] * len(_FUTURES_OI_COLS))
-    set_clause = ", ".join(f"{c} = COALESCE(v.{c}, t.{c})" for c in _FUTURES_OI_COLS)
+    cols = list(col_types)
+    casts = ", ".join(f"%s::{col_types[c]}" for c in cols)
+    set_clause = ", ".join(f"{c} = COALESCE(v.{c}, t.{c})" for c in cols)
     n_updated = 0
     with _connect(database_url) as conn:
         with conn.cursor() as cur:
@@ -595,13 +620,13 @@ def update_market_futures_oi_batch(
                 sql = (
                     f"UPDATE market_daily AS t SET {set_clause}"
                     f" FROM (VALUES {values})"
-                    f" AS v(trade_date, {', '.join(_FUTURES_OI_COLS)})"
+                    f" AS v(trade_date, {', '.join(cols)})"
                     " WHERE t.trade_date = v.trade_date"
                 )
                 params: list = []
                 for trade_date, data in chunk:
                     params.append(trade_date)
-                    params.extend(_safe(data.get(c)) for c in _FUTURES_OI_COLS)
+                    params.extend(_safe(data.get(c)) for c in cols)
                 cur.execute(sql, params)
                 n_updated += cur.rowcount
         conn.commit()

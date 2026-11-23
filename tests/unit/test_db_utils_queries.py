@@ -188,6 +188,31 @@ class TestUpdateMarketFuturesOiBatch:
         assert conn.committed
 
 
+class TestUpdateMarketColumnsBatch:
+    """market_daily 只 UPDATE 的共用批次寫入：期貨未平倉、VIX 回補、當沖校正共用。"""
+
+    def test_casts_each_column_by_its_type(self, monkeypatch) -> None:
+        cur, conn = _pool(monkeypatch, rowcounts=[1])
+        n = db_utils._update_market_columns_batch(
+            URL, {"a": "bigint", "b": "numeric"}, [(dt.date(2026, 11, 20), {"a": 1})]
+        )
+        assert n == 1
+        sql, params = cur.executed[0]
+        assert "(%s::date, %s::bigint, %s::numeric)" in sql
+        assert "a = COALESCE(v.a, t.a)" in sql
+        assert "b = COALESCE(v.b, t.b)" in sql
+        assert "AS v(trade_date, a, b)" in sql
+        assert "INSERT" not in sql
+        assert params == [dt.date(2026, 11, 20), 1, None]
+        assert conn.committed
+
+    def test_empty_skips_db(self, monkeypatch) -> None:
+        cur, conn = _pool(monkeypatch)
+        assert db_utils._update_market_columns_batch(URL, {"a": "bigint"}, []) == 0
+        assert cur.executed == []
+        assert not conn.committed
+
+
 class TestLoadMarketDatesInRange:
     def test_returns_date_set(self, monkeypatch) -> None:
         cur, _ = _pool(monkeypatch, fetchall_rows=[
