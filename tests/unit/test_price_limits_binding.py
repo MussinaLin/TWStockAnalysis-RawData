@@ -51,3 +51,12 @@ class TestPriceLimitsBinding:
     def test_no_reference_price_stays_none(self) -> None:
         assert run._price_limits(120.0, None, 120.0, 111.0) == (None, None)
         assert run._price_limits(None, 1.0, None, None) == (None, None)
+
+    def test_etf_symbol_uses_etf_ticks(self) -> None:
+        """00981A：收 21.5、漲跌 +1.37 → 參考價 20.13，ETF 檔位 0.01。"""
+        up, down = run._price_limits(21.5, 1.37, 21.6, 20.0, symbol="00981A")
+        assert (up, down) == (Decimal("22.14"), Decimal("18.12"))
+
+    def test_stock_symbol_keeps_stock_ticks(self) -> None:
+        up, down = run._price_limits(21.5, 1.37, 21.6, 20.0, symbol="2330")
+        assert (up, down) == (Decimal("22.10"), Decimal("18.15"))

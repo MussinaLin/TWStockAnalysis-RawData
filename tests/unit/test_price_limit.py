@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from tw_stock_rawdata.price_limit import calc_limits, tick_size
+from tw_stock_rawdata.price_limit import calc_limits, is_etf, tick_size
 
 
 class TestTickSize:
@@ -68,3 +68,50 @@ class TestCalcLimits:
         up, down = calc_limits(Decimal(ref))
         assert up % tick_size(up) == 0
         assert down % tick_size(down) == 0
+
+
+class TestIsEtf:
+    @pytest.mark.parametrize("symbol", ["00981A", "0050", "006208", "00631L", " 00981A "])
+    def test_00_prefix_is_etf(self, symbol: str) -> None:
+        assert is_etf(symbol) is True
+
+    @pytest.mark.parametrize("symbol", ["2330", "1101", "6488", "9958", "", None])
+    def test_other_symbols_are_not_etf(self, symbol) -> None:
+        assert is_etf(symbol) is False
+
+
+class TestEtfTickSize:
+    """ETF 升降單位只有兩級：未滿 50 元 0.01、50 元以上 0.05（TWSE ETF 交易制度）。"""
+
+    @pytest.mark.parametrize(
+        ("price", "expected"),
+        [
+            ("0.01", "0.01"),
+            ("10", "0.01"),
+            ("49.99", "0.01"),
+            ("50", "0.05"),
+            ("150", "0.05"),
+            ("1000", "0.05"),
+        ],
+    )
+    def test_band_boundaries(self, price: str, expected: str) -> None:
+        assert tick_size(Decimal(price), etf=True) == Decimal(expected)
+
+
+class TestEtfCalcLimits:
+    def test_uses_etf_ticks_in_10_to_50_band(self) -> None:
+        # 20.13 × 1.1 = 22.143 → 0.01 捨去 → 22.14；× 0.9 = 18.117 → 0.01 進位 → 18.12。
+        # 普通股在這個價位用 0.05，會算成 (22.10, 18.15)。
+        assert calc_limits(Decimal("20.13"), etf=True) == (
+            Decimal("22.14"), Decimal("18.12"),
+        )
+        assert calc_limits(Decimal("20.13")) == (Decimal("22.10"), Decimal("18.15"))
+
+    def test_crosses_50_band_upward(self) -> None:
+        # 45.6 × 1.1 = 50.16，落在 50 元以上（0.05）→ 50.15；× 0.9 = 41.04（0.01）。
+        assert calc_limits(Decimal("45.6"), etf=True) == (
+            Decimal("50.15"), Decimal("41.04"),
+        )
+
+    def test_none_ref_returns_none_pair(self) -> None:
+        assert calc_limits(None, etf=True) == (None, None)

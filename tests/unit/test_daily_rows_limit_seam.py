@@ -80,3 +80,33 @@ def test_build_daily_rows_then_build_raw_rows_places_limits_correctly() -> None:
     assert by_symbol_row["2330"][down_idx] == Decimal("2175")
     assert by_symbol_row["3605"][up_idx] is None
     assert by_symbol_row["3605"][down_idx] is None
+
+
+def test_build_daily_rows_uses_etf_ticks_for_etf_symbol() -> None:
+    # 00981A：收 21.5、MI_INDEX change +1.37 → 參考價 20.13，ETF 檔位 0.01。
+    holdings = pd.DataFrame([{"symbol": "00981A"}])
+    twse_day_all = pd.DataFrame([_day_all_row("00981A", 21.5)])
+    twse_mi_index = pd.DataFrame(
+        [{
+            "symbol": "00981A", "name": "主動統一台股增長", "open": 21.0,
+            "close": 21.5, "high": 21.5, "low": 21.0, "volume": 1000, "change": 1.37,
+        }]
+    )
+
+    result = run._build_daily_rows(
+        date=DATE,
+        holdings=holdings,
+        provider=run.BatchSourceProvider(
+            session=None,
+            twse_3insti=_EMPTY_WITH_SYMBOL,
+            twse_day_all=twse_day_all,
+            twse_mi_index=twse_mi_index,
+            tpex_quotes=_EMPTY_TPEX_QUOTES,
+            tpex_3insti=_EMPTY_WITH_SYMBOL,
+            twse_month_cache={},
+        ),
+    )
+
+    row = result.set_index("symbol").loc["00981A"]
+    assert row["limit_up"] == Decimal("22.14")
+    assert row["limit_down"] == Decimal("18.12")

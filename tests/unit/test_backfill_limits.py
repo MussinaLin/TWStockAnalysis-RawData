@@ -115,6 +115,16 @@ class TestCollectLimitUpdates:
         assert by_symbol["2330"][3] == Decimal("2175")
         assert "6488" in by_symbol
 
+    def test_etf_row_uses_etf_ticks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 00981A：close - change = 20.13 → ETF 檔位 0.01 → (22.14, 18.12)。
+        mi = pd.DataFrame([{"symbol": "00981A", "close": 21.5, "change": 1.37}])
+        empty = pd.DataFrame(columns=["symbol", "close", "change"])
+        self._patch_sources(monkeypatch, mi, empty)
+
+        updates = run._collect_limit_updates(None, DATE)
+
+        assert updates == [("00981A", DATE, Decimal("22.14"), Decimal("18.12"))]
+
     def test_skips_rows_without_reference_price(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

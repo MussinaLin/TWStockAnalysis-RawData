@@ -61,7 +61,7 @@ from .prepare import (
     prepare_twse_mi_index,
     prepare_taifex_txf_oi,
 )
-from .price_limit import calc_limits
+from .price_limit import calc_limits, is_etf
 from .sources import (
     DataUnavailableError,
     build_session,
@@ -755,7 +755,8 @@ def _collect_limit_updates(
             if not symbol:
                 continue
             limit_up, limit_down = _price_limits(
-                row.get("close"), row.get("change"), row.get("high"), row.get("low")
+                row.get("close"), row.get("change"), row.get("high"), row.get("low"),
+                symbol=symbol,
             )
             if limit_up is None or limit_down is None:
                 continue
@@ -1638,7 +1639,7 @@ def _build_daily_rows(
         volume = ohlcv.volume
 
         limit_up, limit_down = _price_limits(
-            close_price, ohlcv.change, high_price, low_price
+            close_price, ohlcv.change, high_price, low_price, symbol=symbol
         )
 
         # 逐檔跳過 1：無價格（OHLC 來源對該檔失敗或當天無交易）
@@ -1749,8 +1750,10 @@ def _reference_price(close, change) -> Decimal | None:
     return Decimal(str(close)) - Decimal(str(change))
 
 
-def _price_limits(close, change, high=None, low=None):
+def _price_limits(close, change, high=None, low=None, *, symbol=None):
     """算當日漲跌停價；區間若無拘束力則回 (None, None)。
+
+    symbol 用來判定升降單位：ETF（代號 00 開頭）用 ETF 的兩級制，見 `price_limit`。
 
     新上市櫃前五日等標的無漲跌幅限制（櫃買以「次日漲停價 9995 / 跌停價 0.01」表示），
     但交易所照樣給漲跌價差，照 ±10% 算出來的區間是假的。實際成交價落在區間外就是
@@ -1758,7 +1761,9 @@ def _price_limits(close, change, high=None, low=None):
 
     收盤價剛好等於漲停/跌停價是漲停跌停，不是區間失效，不可誤殺。
     """
-    limit_up, limit_down = calc_limits(_reference_price(close, change))
+    limit_up, limit_down = calc_limits(
+        _reference_price(close, change), etf=is_etf(symbol)
+    )
     if limit_up is None or limit_down is None:
         return None, None
     for price in (high, low, close):
