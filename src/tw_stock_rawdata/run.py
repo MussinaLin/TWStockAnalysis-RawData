@@ -81,6 +81,7 @@ from .sources import (
     fetch_tpex_margin_v2,
     fetch_tpex_stock_day,
     fetch_twse_company_basic,
+    fetch_twse_day_trade,
     fetch_twse_disposition,
     fetch_twse_foreign_net,
     fetch_twse_margin,
@@ -3019,7 +3020,7 @@ def _settle_market_margin(
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
-    """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉, 台指 VIX and upsert to market_daily."""
+    """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉, 台指 VIX, 上市當沖統計 and upsert to market_daily."""
     market_data: dict = {}
 
     # 每個子來源失敗都要印 log（README「來源失敗一律印 log」）：這些欄位寫成 NULL 之後
@@ -3070,6 +3071,13 @@ def _fetch_and_upsert_market_daily(
         market_data["tw_vix_close"] = fetch_taifex_vix_close(session, date)
     except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  台指 VIX 取得失敗：{exc}")
+
+    # TWSE 上市大盤當沖統計（TWTB4U）。這裡寫的是 D 日初版，最終值由 daily 的
+    # _settle_market_day_trade 在 3 個交易日後重抓校正；D 當晚尚未公布時也由它補上。
+    try:
+        market_data.update(fetch_twse_day_trade(session, date))
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"  大盤當沖統計取得失敗：{exc}")
 
     if prev_margin_balance is not None:
         try:

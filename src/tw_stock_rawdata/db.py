@@ -138,6 +138,12 @@ CREATE TABLE IF NOT EXISTS market_daily (
     txf_total_oi_net           BIGINT,
     txf_total_oi_net_amount    BIGINT,
     tw_vix_close               NUMERIC(8,2),
+    day_trade_shares           BIGINT,
+    day_trade_shares_pct       NUMERIC(6,4),
+    day_trade_buy_amount       BIGINT,
+    day_trade_buy_amount_pct   NUMERIC(6,4),
+    day_trade_sell_amount      BIGINT,
+    day_trade_sell_amount_pct  NUMERIC(6,4),
     created_time          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_time          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -157,6 +163,15 @@ ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS txf_total_oi_net_amount   BIGI
 -- tw_vix_close：台指 VIX（臺指選擇權波動率指數，期交所編製）13:45 收盤值。
 -- daily 取期交所當日檔；--backfill-vix 取月檔（期交所只保留近 4 個月）。
 ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS tw_vix_close NUMERIC(8,2);
+-- day_trade_*：上市大盤當沖統計，照 TWSE TWTB4U「當日沖銷交易統計資訊」原樣存。
+-- shares（股）、buy/sell_amount（元）；*_pct 為占市場比重，存小數（26.1% → 0.2610）。
+-- T 日初版、T+2 為最終值；daily 以往前第 3 個交易日重抓校正（見 run._settle_market_day_trade）。
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_shares          BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_shares_pct      NUMERIC(6,4);
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_buy_amount      BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_buy_amount_pct  NUMERIC(6,4);
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_sell_amount     BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_sell_amount_pct NUMERIC(6,4);
 
 -- stock_holder_percent (大戶 / 散戶持股佔比)
 -- 資料來源：TDCC 集保戶股權分散表，每週更新一次（trade_date 為週五結算日）。

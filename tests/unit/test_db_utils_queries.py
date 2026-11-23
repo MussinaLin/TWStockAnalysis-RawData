@@ -160,6 +160,25 @@ class TestUpsertMarketDaily:
         assert "tw_vix_close = COALESCE(EXCLUDED.tw_vix_close, market_daily.tw_vix_close)" in sql
 
 
+    def test_day_trade_columns_are_written_with_coalesce(self, monkeypatch) -> None:
+        cur, _ = _pool(monkeypatch)
+        db_utils.upsert_market_daily(
+            URL, dt.date(2026, 11, 20), {"day_trade_shares": 4460672000}
+        )
+        sql, params = cur.executed[0]
+        assert params["day_trade_shares"] == 4460672000
+        assert params["day_trade_sell_amount_pct"] is None
+        for col in DAY_TRADE_COLS:
+            assert f"{col} = COALESCE(EXCLUDED.{col}, market_daily.{col})" in sql
+
+
+DAY_TRADE_COLS = [
+    "day_trade_shares", "day_trade_shares_pct",
+    "day_trade_buy_amount", "day_trade_buy_amount_pct",
+    "day_trade_sell_amount", "day_trade_sell_amount_pct",
+]
+
+
 FUTURES_OI_COLS = [
     f"txf_{who}_oi_net{suffix}"
     for who in ("foreign", "trust", "dealer", "total")
@@ -234,6 +253,38 @@ class TestUpdateMarketVixBatch:
         assert "INSERT" not in sql
         assert params == [dt.date(2026, 11, 20), 52.13]
         assert conn.committed
+
+
+class TestUpdateMarketDayTradeBatch:
+    def test_casts_by_column_type_without_insert(self, monkeypatch) -> None:
+        cur, conn = _pool(monkeypatch, rowcounts=[1])
+        n = db_utils.update_market_day_trade_batch(
+            URL, [(dt.date(2026, 11, 18), {"day_trade_shares": 1, "day_trade_shares_pct": 0.26})]
+        )
+        assert n == 1
+        sql, params = cur.executed[0]
+        assert ("(%s::date, %s::bigint, %s::numeric, %s::bigint, %s::numeric,"
+                " %s::bigint, %s::numeric)") in sql
+        assert "INSERT" not in sql
+        for col in DAY_TRADE_COLS:
+            assert f"{col} = COALESCE(v.{col}, t.{col})" in sql
+        assert params == [dt.date(2026, 11, 18), 1, 0.26, None, None, None, None]
+        assert conn.committed
+
+
+class TestFindPrevMarketTradeDate:
+    def test_returns_nth_previous_date(self, monkeypatch) -> None:
+        cur, _ = _pool(monkeypatch, fetch_results=[(dt.date(2026, 11, 18),)])
+        out = db_utils.find_prev_market_trade_date(URL, dt.date(2026, 11, 23), 3)
+        assert out == dt.date(2026, 11, 18)
+        sql, params = cur.executed[0]
+        assert "FROM market_daily WHERE trade_date < %s" in sql
+        assert "ORDER BY trade_date DESC OFFSET %s LIMIT 1" in sql
+        assert params == (dt.date(2026, 11, 23), 2)
+
+    def test_none_when_not_enough_history(self, monkeypatch) -> None:
+        _pool(monkeypatch, fetch_results=[None])
+        assert db_utils.find_prev_market_trade_date(URL, dt.date(2022, 1, 4), 3) is None
 
 
 class TestLoadMarketDatesInRange:

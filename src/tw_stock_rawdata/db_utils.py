@@ -533,6 +533,16 @@ _FUTURES_OI_COLS = [
 # 台指 VIX 收盤值（欄名 → PG 型別，給 _update_market_columns_batch 的 cast 用）。
 _VIX_COL_TYPES: dict[str, str] = {"tw_vix_close": "numeric"}
 
+# 上市大盤當沖統計 6 欄（順序同 sources._DAY_TRADE_FIELDS）：股數／金額 bigint、占比 numeric。
+_DAY_TRADE_COL_TYPES: dict[str, str] = {
+    "day_trade_shares": "bigint",
+    "day_trade_shares_pct": "numeric",
+    "day_trade_buy_amount": "bigint",
+    "day_trade_buy_amount_pct": "numeric",
+    "day_trade_sell_amount": "bigint",
+    "day_trade_sell_amount_pct": "numeric",
+}
+
 
 def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> None:
     """Upsert a single row into market_daily table.
@@ -542,7 +552,8 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         trade_date: The trading date.
         data: dict with keys: taiex_open, taiex_high, taiex_low, taiex_close,
               total_volume, margin_balance, margin_balance_change, foreign_net,
-              以及 `_FUTURES_OI_COLS` 的台指期未平倉欄、`_VIX_COL_TYPES` 的台指 VIX 欄。
+              以及 `_FUTURES_OI_COLS` 的台指期未平倉欄、`_VIX_COL_TYPES` 的台指 VIX 欄、
+              `_DAY_TRADE_COL_TYPES` 的當沖統計欄。
     """
     row = {"trade_date": trade_date, **data}
     cols = [
@@ -550,6 +561,7 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         "total_volume", "margin_balance", "margin_balance_change", "foreign_net",
         *_FUTURES_OI_COLS,
         *_VIX_COL_TYPES,
+        *_DAY_TRADE_COL_TYPES,
     ]
     # Only include columns that exist in data
     row = {c: row.get(c) for c in cols}
@@ -600,6 +612,18 @@ def update_market_vix_batch(
     updates 的 data_dict 鍵為 `tw_vix_close`。
     """
     return _update_market_columns_batch(database_url, _VIX_COL_TYPES, updates)
+
+
+def update_market_day_trade_batch(
+    database_url: str,
+    updates: list[tuple[dt.date, dict]],
+) -> int:
+    """批次覆寫 market_daily 的上市當沖統計 6 欄（daily 的往前第 3 個交易日校正用）。
+
+    只 UPDATE 已存在的 row、不 INSERT，理由同 `update_market_futures_oi_batch`。
+    updates 的 data_dict 鍵同 `_DAY_TRADE_COL_TYPES`。
+    """
+    return _update_market_columns_batch(database_url, _DAY_TRADE_COL_TYPES, updates)
 
 
 def _update_market_columns_batch(
@@ -659,6 +683,23 @@ def load_market_dates_in_range(
             (start, end),
         ).fetchall()
     return {r[0] for r in rows}
+
+
+def find_prev_market_trade_date(
+    database_url: str, date: dt.date, n: int
+) -> dt.date | None:
+    """回傳 market_daily 中早於 date 的第 n 個 trade_date（n=1 為前一個）；不足則 None。
+
+    當沖統計校正用：daily 重抓往前第 3 個交易日（T+2 更新後的最終值）。
+    """
+    with _connect(database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT trade_date FROM market_daily WHERE trade_date < %s"
+            " ORDER BY trade_date DESC OFFSET %s LIMIT 1",
+            (date, n - 1),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
 
 
 def find_next_market_trade_date(database_url: str, date: dt.date) -> dt.date | None:

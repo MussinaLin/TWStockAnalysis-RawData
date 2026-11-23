@@ -11,7 +11,11 @@ import re
 import pytest
 
 from tw_stock_rawdata.db import _SCHEMA_SQL
-from tw_stock_rawdata.db_utils import _FUTURES_OI_COLS, _VIX_COL_TYPES
+from tw_stock_rawdata.db_utils import (
+    _DAY_TRADE_COL_TYPES,
+    _FUTURES_OI_COLS,
+    _VIX_COL_TYPES,
+)
 
 
 def _create_table_body(table: str) -> str:
@@ -45,4 +49,32 @@ def test_vix_column_has_online_migration() -> None:
     assert re.search(
         r"ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS tw_vix_close\s+NUMERIC\(8,2\);",
         _SCHEMA_SQL,
+    )
+
+
+_DAY_TRADE_DDL = {
+    "day_trade_shares": r"BIGINT",
+    "day_trade_shares_pct": r"NUMERIC\(6,4\)",
+    "day_trade_buy_amount": r"BIGINT",
+    "day_trade_buy_amount_pct": r"NUMERIC\(6,4\)",
+    "day_trade_sell_amount": r"BIGINT",
+    "day_trade_sell_amount_pct": r"NUMERIC\(6,4\)",
+}
+
+
+def test_day_trade_col_types_match_ddl() -> None:
+    assert list(_DAY_TRADE_COL_TYPES) == list(_DAY_TRADE_DDL)
+    for col, pg_type in _DAY_TRADE_COL_TYPES.items():
+        assert pg_type == ("numeric" if col.endswith("_pct") else "bigint")
+
+
+@pytest.mark.parametrize("col,ddl", _DAY_TRADE_DDL.items())
+def test_day_trade_column_in_create_table(col: str, ddl: str) -> None:
+    assert re.search(rf"^\s*{col}\s+{ddl},", _create_table_body("market_daily"), re.M)
+
+
+@pytest.mark.parametrize("col,ddl", _DAY_TRADE_DDL.items())
+def test_day_trade_column_has_online_migration(col: str, ddl: str) -> None:
+    assert re.search(
+        rf"ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS {col}\s+{ddl};", _SCHEMA_SQL
     )
