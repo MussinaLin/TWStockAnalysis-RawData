@@ -34,6 +34,7 @@ TWSE_TAIEX_OHLC_URL = "https://www.twse.com.tw/indicesReport/MI_5MINS_HIST"
 TWSE_MARKET_VOLUME_URL = "https://www.twse.com.tw/exchangeReport/FMTQIK"
 TWSE_FOREIGN_NET_URL = "https://www.twse.com.tw/fund/BFI82U"
 TWSE_MARKET_MARGIN_URL = "https://www.twse.com.tw/exchangeReport/MI_MARGN"
+TWSE_DAY_TRADE_URL = "https://www.twse.com.tw/rwd/zh/dayTrading/TWTB4U"
 TPEX_MARGIN_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"
 TPEX_MARGIN_V2_URL = "https://www.tpex.org.tw/www/zh-tw/margin/balance"
 # 處置股公告。兩支都吃日期區間，一次呼叫涵蓋整段（實測半年 314 / 574 筆無截斷）。
@@ -1281,6 +1282,65 @@ def fetch_twse_market_margin(
         reason = stat if stat != "OK" else "找不到「融資金額」列或今日餘額無法解析"
         raise DataUnavailableError(f"MI_MARGN：{reason or '回傳異常'}")
     return parsed
+
+
+# TWTB4U「當日沖銷交易統計資訊」表的欄位（依序）→ market_daily 欄名。占比欄存小數。
+_DAY_TRADE_FIELDS: list[tuple[str, str]] = [
+    ("當日沖銷交易總成交股數", "day_trade_shares"),
+    ("當日沖銷交易總成交股數占市場比重%", "day_trade_shares_pct"),
+    ("當日沖銷交易總買進成交金額", "day_trade_buy_amount"),
+    ("當日沖銷交易總買進成交金額占市場比重%", "day_trade_buy_amount_pct"),
+    ("當日沖銷交易總賣出成交金額", "day_trade_sell_amount"),
+    ("當日沖銷交易總賣出成交金額占市場比重%", "day_trade_sell_amount_pct"),
+]
+
+
+@_retry_on_transient
+def fetch_twse_day_trade(
+    session: requests.Session, date: dt.date
+) -> dict[str, int | float | None]:
+    """抓上市大盤當沖統計（TWTB4U「當日沖銷交易統計資訊」表），照 TWSE 原樣回 6 欄。
+
+    股數（股）、金額（元）為 int；占比為小數（26.1% → 0.261）。單一數值解析不出來
+    該欄為 None，不整筆丟棄。T 日晚間公布初版、T+1／T+2 各再修正一次，T+2 為最終值
+    （校正見 run._settle_market_day_trade）。同一回應的個股明細表不使用。
+
+    Raises:
+        DataUnavailableError: stat 不是 OK（訊息帶 stat 原文，限流字串看得出來）、
+            資料日期不是請求日、找不到統計表、表頭改版、資料列不是恰好 1 列。
+    """
+    params = {"date": date.strftime("%Y%m%d"), "selectType": "All", "response": "json"}
+    payload = _http_get(session, TWSE_DAY_TRADE_URL, params).json()
+    if payload.get("stat") != "OK":
+        raise DataUnavailableError(f"TWTB4U：{payload.get('stat') or '回傳異常'}")
+
+    data_date = _parse_date_any(str(payload.get("date", "")))
+    if data_date != date:
+        raise DataUnavailableError(f"TWTB4U 資料日期 {data_date} 不是請求日 {date}")
+
+    table = next(
+        (t for t in payload.get("tables") or []
+         if "當日沖銷交易統計資訊" in str(t.get("title", ""))),
+        None,
+    )
+    if table is None:
+        raise DataUnavailableError("TWTB4U 找不到「當日沖銷交易統計資訊」表")
+
+    expected = [name for name, _ in _DAY_TRADE_FIELDS]
+    if table.get("fields") != expected:
+        raise DataUnavailableError(f"TWTB4U 統計表表頭改版：{table.get('fields')!r}")
+    rows = table.get("data") or []
+    if len(rows) != 1 or len(rows[0]) != len(expected):
+        raise DataUnavailableError(f"TWTB4U 統計表應為 1 列 {len(expected)} 欄，實際 {rows!r}")
+
+    result: dict[str, int | float | None] = {}
+    for (_, col), raw in zip(_DAY_TRADE_FIELDS, rows[0]):
+        if col.endswith("_pct"):
+            pct = _clean_number(raw)
+            result[col] = None if pct is None else pct / 100
+        else:
+            result[col] = _clean_int(raw)
+    return result
 
 
 # ---------------------------------------------------------------------------
