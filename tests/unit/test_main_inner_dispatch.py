@@ -63,6 +63,11 @@ def spies(monkeypatch):
         run, "_settle_market_margin",
         lambda session, config, date: calls["settle_dates"].append(date),
     )
+    calls["day_trade_settle_dates"] = []
+    monkeypatch.setattr(
+        run, "_settle_market_day_trade",
+        lambda session, config, today: calls["day_trade_settle_dates"].append(today),
+    )
     monkeypatch.setattr(run, "_prefetch_margin_cache", spy("prefetch_margin", retval={}))
     monkeypatch.setattr(run, "_prefetch_holding_pct_cache", spy("prefetch_holding", retval={}))
     monkeypatch.setattr(run, "_fetch_disposition", spy("fetch_disposition", retval=None))
@@ -302,3 +307,30 @@ class TestSettleMarketMarginAfterRewrite:
             TODAY, TODAY,
         )
         assert spies["settle_dates"] == []
+
+
+class TestSettleMarketDayTrade:
+    """當沖校正只在 daily（target_date == today 且有寫入）做 1 次；歷史日與回補不做。"""
+
+    def test_daily_settles_day_trade_once(self, spies) -> None:
+        run._main_inner(CONFIG, _args(), TODAY, TODAY)
+        assert spies["day_trade_settle_dates"] == [TODAY]
+
+    def test_explicit_date_today_also_settles(self, spies) -> None:
+        run._main_inner(CONFIG, _args(date=TODAY.isoformat()), TODAY, TODAY)
+        assert spies["day_trade_settle_dates"] == [TODAY]
+
+    def test_historical_date_does_not_settle_day_trade(self, spies) -> None:
+        run._main_inner(CONFIG, _args(date="2026-08-19"), TODAY, dt.date(2026, 8, 19))
+        assert spies["day_trade_settle_dates"] == []
+
+    def test_unwritten_today_does_not_settle_day_trade(self, spies, monkeypatch) -> None:
+        monkeypatch.setattr(run, "_run_for_date", lambda *a, **k: False)
+        run._main_inner(CONFIG, _args(), TODAY, TODAY)
+        assert spies["day_trade_settle_dates"] == []
+
+    def test_backfill_does_not_settle_day_trade(self, spies) -> None:
+        run._main_inner(
+            CONFIG, _args(backfill_start="2026-08-17", backfill_end="2026-08-21"), TODAY, TODAY
+        )
+        assert spies["day_trade_settle_dates"] == []

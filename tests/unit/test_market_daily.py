@@ -4,9 +4,10 @@ docs/refactor-plan.md T2。_fetch_and_upsert_market_daily 原本覆蓋率 2%
 （58 行只有 1 行被執行），CC 16，且是**唯一**寫共用表 market_daily 的路徑
 （CLAUDE.md 列為 --backfill-stocks 刻意不碰的表），完全沒有回歸保護。
 
-核心不變量：五個子來源各自獨立失敗，任一失敗不影響其他四個，也不阻止寫入
+核心不變量：各子來源各自獨立失敗，任一失敗不影響其他來源，也不阻止寫入
 已取得的部分——搭配 upsert_market_daily 的 COALESCE，缺的欄位不會覆寫舊值。
-第五個來源是期交所台指期三大法人未平倉（TAIFEX，與前四個 TWSE 來源不同站）。
+子來源：TWSE 大盤 OHLC／成交金額／外資買賣超／融資、期交所台指期三大法人未平倉、
+期交所台指 VIX、TWSE 上市當沖統計。
 """
 
 from __future__ import annotations
@@ -173,7 +174,7 @@ class TestHappyPath:
 
 
 class TestPartialFailureIsolation:
-    """五個子來源各自獨立失敗，不影響其他來源，也不阻止寫入已取得的部分。"""
+    """各子來源各自獨立失敗，不影響其他來源，也不阻止寫入已取得的部分。"""
 
     @pytest.mark.parametrize(
         "attr,exc,lost_key,kept_key",

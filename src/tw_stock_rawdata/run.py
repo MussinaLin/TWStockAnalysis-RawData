@@ -21,6 +21,7 @@ from .db_utils import (
     correct_prev_margin_balance,
     find_consensus_prev_trade_date,
     find_next_market_trade_date,
+    find_prev_market_trade_date,
     get_config_value,
     get_enabled_stocks,
     load_market_dates_in_range,
@@ -33,6 +34,7 @@ from .db_utils import (
     update_prev_day_margin_batch,
     update_price_limits_batch,
     update_margin_batch,
+    update_market_day_trade_batch,
     update_market_futures_oi_batch,
     update_market_vix_batch,
     update_trust_holding_batch,
@@ -3017,6 +3019,44 @@ def _settle_market_margin(
         print(f"  大盤融資收尾校正失敗（{date}）：{exc}")
 
 
+# 當沖統計校正對象：DB 裡往前第幾個交易日。TWSE 以 T+2 的更新為最終值，但 T+2 的更新
+# 在 T+2 晚間、與 22:00 的 daily 幾乎同時，不保證已更新；取第 3 個保證拿到最終值，
+# 請求數一樣是 1 次，代價只是最終值晚一天到位。**不要**改成 2。
+_DAY_TRADE_SETTLE_LAG = 3
+
+
+def _settle_market_day_trade(
+    session: requests.Session, config: AppConfig, today: dt.date
+) -> None:
+    """daily 收尾：重抓 DB 往前第 3 個交易日的上市當沖統計，只 UPDATE 那一列。
+
+    - 讓每個交易日在 3 個交易日後拿到 TWSE 的最終值（T+2 修正後）。
+    - 同時是備援：D 當晚 TWSE 尚未公布（成交量大時會延後）時 D 先是 NULL，由此補上。
+    - 只在 daily 做 1 次（每天固定多 1 次 TWSE 請求）。`--date` 與區間回補不做：舊日期
+      抓到的本來就是最終值，最近 3 天內的會由之後的 daily 校正到。某天 daily 沒跑，
+      對應那天的校正就少一次，停在 T+1／T+2 的值（小幅修正，接受）。
+
+    收尾是附加動作，任何失敗只印 log，不讓 daily 以 traceback 結束。
+    """
+    try:
+        target = find_prev_market_trade_date(
+            config.database_url, today, _DAY_TRADE_SETTLE_LAG
+        )
+        if target is None:
+            print(
+                f"  大盤當沖統計校正略過：market_daily 在 {today} 之前不足 "
+                f"{_DAY_TRADE_SETTLE_LAG} 個交易日"
+            )
+            return
+        data = fetch_twse_day_trade(session, target)
+        n = update_market_day_trade_batch(config.database_url, [(target, data)])
+        print(f"  大盤當沖統計已校正 {target}（更新 {n} 列）")
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"  大盤當沖統計校正失敗（{today} 往前第 {_DAY_TRADE_SETTLE_LAG} 個交易日）：{exc}")
+    except Exception as exc:
+        print(f"  大盤當沖統計校正失敗（DB）：{exc}")
+
+
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
@@ -3348,6 +3388,9 @@ def _main_inner(
     # 重跑歷史日：寫入的是當日速報餘額，要用隔日的前日餘額校正回來。今天沒有隔日。
     if written and target_date < today:
         _settle_market_margin(session, config, target_date)
+    # daily：重抓往前第 3 個交易日的當沖統計（TWSE 以 T+2 為最終值）。歷史日不需要。
+    if written and target_date == today:
+        _settle_market_day_trade(session, config, target_date)
 
 
 if __name__ == "__main__":

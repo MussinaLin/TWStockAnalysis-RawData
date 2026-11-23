@@ -63,7 +63,7 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 - `stock_daily_raw` — 每日逐檔 raw（PK `(symbol, trade_date)`，**按年 RANGE partition**）
   含處置股註記 `is_disposition` / `disposition_match_minutes`（語意見 README）
 - `market_daily` — 大盤每日行情（trade_date PK），含台指期（大台）三大法人未平倉淨額 `txf_*`、
-  台指 VIX 收盤值 `tw_vix_close`
+  台指 VIX 收盤值 `tw_vix_close`、上市大盤當沖統計 `day_trade_*`
 
 ## Gotchas（重要不變量，改動前必讀）
 
@@ -108,3 +108,6 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 - **台指 VIX daily 用當日檔、不可改用月檔**：月檔在收盤後數小時內還沒有當日列。當日檔找不到
   13:45 那一列就寫 NULL，**不要**退而取最後一筆 tick（盤中不完整的檔案最後一筆不是收盤）。
   `--backfill-vix` 用月檔（只保留近 4 個月），同樣只 UPDATE 不 INSERT `market_daily`。
+- **當沖統計校正只在 daily 做 1 次、對象是 DB 往前第 3 個交易日**（`_settle_market_day_trade`）：
+  TWSE 以 T+2 為最終值，但 T+2 更新與 22:00 的 daily 幾乎同時，**不要**改成第 2 個；也**不要**
+  改成回補每天都做（舊日期抓到的已是最終值，回補 N 天就多打 N 次 TWSE）。

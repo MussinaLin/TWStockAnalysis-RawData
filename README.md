@@ -1,6 +1,6 @@
 # TWStockAnalysis-RawData
 
-每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情、台指期三大法人未平倉、台指 VIX），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
+每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情、台指期三大法人未平倉、台指 VIX、上市大盤當沖統計），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
 
 ## 職責邊界
 
@@ -292,6 +292,36 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
 - **只 UPDATE 已存在的列、不 INSERT**（理由同 `--backfill-futures-oi`）；來源 `NULL` 不覆寫。
   收尾列出兩邊對不上的日期。`--backfill-stocks`、`--date` 會被忽略並印警告。結果冪等。
 
+#### 上市大盤當沖統計（day_trade_*）
+
+來源是 TWSE「當日沖銷交易標的及成交量值」（`GET https://www.twse.com.tw/rwd/zh/dayTrading/TWTB4U`，
+`selectType=All`）回應中的「當日沖銷交易統計資訊」表，**照 TWSE 原樣存 6 欄**，不自己挑「哪個才是
+當沖率」（新聞常說的「當沖占比」是金額占比）。同一回應的個股明細不存。
+
+| 欄位 | 意義 | 2026-11-20 實測 |
+|------|------|------|
+| `day_trade_shares` | 當沖成交股數（股） | 4,460,672,000 |
+| `day_trade_shares_pct` | 當沖成交股數 ÷ 整體市場成交股數 | 0.2610 |
+| `day_trade_buy_amount` | 當沖買進成交金額（元） | 322,561,954,550 |
+| `day_trade_buy_amount_pct` | 當沖買進金額 ÷ ((市場買進 + 賣出金額) ÷ 2) | 0.3448 |
+| `day_trade_sell_amount` | 當沖賣出成交金額（元） | 322,720,245,100 |
+| `day_trade_sell_amount_pct` | 當沖賣出金額 ÷ ((市場買進 + 賣出金額) ÷ 2) | 0.3450 |
+
+- 占比存**小數**（TWSE 的 26.1% → 0.2610），與 `foreign_holding_pct` 慣例一致。分母含一般、盤後定價、
+  零股、鉅額交易（TWSE 附註）。只有上市，不含上櫃。
+- 驗證：`stat` 必須 `OK`、資料日期必須等於請求日、表頭 6 欄名稱必須完全相同且恰好 1 列，否則整筆
+  不寫並印 `大盤當沖統計取得失敗：{原因}`（原因帶 `stat` 原文，限流字串看得出來）。單一數值是 `--`
+  只讓該欄 `NULL`。
+- **TWSE 在 T 日晚間公布初版，T+1、T+2 晚間各修正一次，T+2 為最終值。** daily 寫的是 D 日初版，
+  收尾再重抓 **DB 往前第 3 個交易日**、只 UPDATE 那一列（`_settle_market_day_trade`）：
+  - 為什麼是第 3 個：T+2 的更新與 22:00 的 daily 幾乎同時，不保證已更新；第 3 個保證是最終值，
+    請求數一樣，代價只是最終值晚一天到位。
+  - 同時是備援：D 當晚 TWSE 若還沒公布（成交量大時會延後），D 先是 `NULL`，3 個交易日後補上。
+  - 只在 daily 做（每天固定多 1 次 TWSE 請求）；`--date` 歷史日與區間回補不做 —— 舊日期抓到的
+    本來就是最終值，最近 3 天內的由之後的 daily 校正到。
+  - 已知缺口：某天 daily 沒跑，對應那天的校正就少一次，該日停在 T+1／T+2 的值（小幅修正，接受）。
+- 歷史回補尚未提供（TWSE 2014-01-06 起都有資料）；目前只有 daily 與一般區間回補會寫。
+
 ### 回補特定股票（--backfill-stocks）
 
 `--backfill-stocks` 走 **per-stock 區間抓取**，與其他回補模式的成本結構不同：
@@ -412,7 +442,8 @@ HTML 頁面（MoneyDJ 融資融券／法人持股、TDCC 集保分布）的 `pd.
 - OHLCV fallback 鏈最後一環 `STOCK_DAY` 月表：`{symbol} STOCK_DAY 月表取得失敗：{原因}`
   （該檔 OHLCV 缺值寫 `NULL`）。
 - `market_daily` 的子來源各自印 `大盤 OHLC／大盤成交金額／大盤外資買賣超／大盤融資餘額／
-  台指期三大法人未平倉／台指 VIX 取得失敗：{原因}`。包含「月表抓到了但沒有當日」（`MI_5MINS_HIST`、
+  台指期三大法人未平倉／台指 VIX／大盤當沖統計 取得失敗：{原因}`；daily 收尾的當沖校正失敗印
+  `大盤當沖統計校正失敗`。包含「月表抓到了但沒有當日」（`MI_5MINS_HIST`、
   `FMTQIK`）與 TWSE `stat` 不是 `OK`（`BFI82U`、`MI_MARGN`，原因帶 `stat` 原文，限流字串
   看得出來）。這些欄寫成 `NULL` 後不會有流程回頭補，`MI_MARGN` 失敗還會連帶跳過 D-1
   校正，曾因此讓 DEV／PROD 的大盤融資餘額與外資買賣超各自缺漏而無人察覺。
