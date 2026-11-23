@@ -45,6 +45,11 @@ TPEX_DISPOSAL_V2_URL = "https://www.tpex.org.tw/www/zh-tw/bulletin/disposal"
 # 期交所三大法人「區分各期貨契約」CSV 下載。吃日期區間（實測近三年整段一發回完），
 # 但只保留近三年；休市、超出範圍都回 HTTP 200 + HTML alert，見 fetch_taifex_txf_institutional。
 TAIFEX_FUT_CONTRACTS_DOWN_URL = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
+# 台指 VIX：daily 用當日檔（收盤後即有 13:45 列），回補用月檔（只保留近 4 個月）。
+TAIFEX_VIX_DAILY_URL = "https://www.taifex.com.tw/cht/7/getVixData"
+TAIFEX_VIX_MONTH_URL = (
+    "https://www.taifex.com.tw/file/taifex/Dailydownload/vix/log2data/{yyyymm}new.txt"
+)
 MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
 MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
 TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
@@ -1324,6 +1329,92 @@ def fetch_taifex_txf_institutional(
         raise DataUnavailableError(f"期交所回應「{message}」（{start} ~ {end}）")
 
     return pd.read_csv(io.StringIO(content.decode("cp950")), dtype=str)
+
+
+_VIX_DAILY_HEADER = ["交易日期", "時間(時/分/秒/毫秒)", "臺指選擇權波動率指數"]
+_VIX_MONTH_HEADER = [*_VIX_DAILY_HEADER, "收盤前1分鐘平均指數"]
+# 台指 VIX 的收盤時刻（期交所時間欄格式 時分秒毫秒）。月檔的「收盤」就是這一列。
+_VIX_CLOSE_TIME = "13450000"
+
+
+def _parse_taifex_vix_rows(
+    content: bytes, expected_header: list[str], label: str
+) -> list[list[str]]:
+    """期交所 VIX 文字檔 → 資料列（每列為去掉空欄後的字串 list）。
+
+    格式：cp950、tab 分隔（欄間有多個 tab）、首行表頭、次行 `----` 分隔線。實測行尾
+    CRLF 與 LF 混用。錯誤頁是 HTML（過期月檔會 302 到 404.htm，最終仍是 HTTP 200），
+    與解碼失敗、表頭改版一律 DataUnavailableError。
+    """
+    if content.lstrip().startswith(b"<"):
+        raise DataUnavailableError(f"{label}：期交所回傳 HTML 而非資料檔")
+    try:
+        text = content.decode("cp950")
+    except UnicodeDecodeError as exc:
+        raise DataUnavailableError(f"{label}：內容無法以 cp950 解碼") from exc
+
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise DataUnavailableError(f"{label}：檔案是空的")
+    header = [c.strip() for c in lines[0].split("\t") if c.strip()]
+    if header != expected_header:
+        raise DataUnavailableError(f"{label} 表頭改版：{header!r}")
+    return [
+        [c.strip() for c in line.split("\t") if c.strip()]
+        for line in lines[1:]
+        if not line.lstrip().startswith("-")
+    ]
+
+
+@_retry_on_transient
+def fetch_taifex_vix_close(session: requests.Session, date: dt.date) -> float:
+    """抓台指 VIX 在 date 的收盤值（13:45:00 那一列）。
+
+    用當日檔而非月檔：月檔在收盤後數小時內還沒有當日列（2026-11-23 15:29 實測）。
+    找不到 13:45 列就丟錯、**不**退而取最後一筆 tick：盤中抓到的不完整檔案，
+    最後一筆不是收盤，寫下去是看不出來的錯值。
+    """
+    key = date.strftime("%Y%m%d")
+    response = session.get(TAIFEX_VIX_DAILY_URL, params={"filesname": key}, timeout=30)
+    response.raise_for_status()
+    rows = _parse_taifex_vix_rows(
+        response.content, _VIX_DAILY_HEADER, f"期交所 VIX 當日檔 {date}"
+    )
+    for row in rows:
+        if len(row) >= 3 and row[0] == key and row[1] == _VIX_CLOSE_TIME:
+            value = _clean_number(row[2])
+            if value is None:
+                raise DataUnavailableError(f"期交所 VIX {date} 13:45 收盤值無法解析：{row[2]!r}")
+            return value
+    raise DataUnavailableError(
+        f"期交所 VIX 當日檔沒有 {date} 13:45:00 收盤列（檔案可能尚未完整）"
+    )
+
+
+@_retry_on_transient
+def fetch_taifex_vix_month(
+    session: requests.Session, month: dt.date
+) -> dict[dt.date, float]:
+    """抓台指 VIX 在 month 所屬月份的每日收盤（--backfill-vix 用）。
+
+    期交所只保留近 4 個月的月檔；更早的月份回 HTML，丟 DataUnavailableError。
+    收盤值無法解析的日子略過（不放進回傳值）。
+    """
+    label = f"期交所 VIX 月檔 {month:%Y-%m}（只提供近 4 個月）"
+    url = TAIFEX_VIX_MONTH_URL.format(yyyymm=month.strftime("%Y%m"))
+    response = session.get(url, timeout=30)
+    response.raise_for_status()
+    rows = _parse_taifex_vix_rows(response.content, _VIX_MONTH_HEADER, label)
+
+    result: dict[dt.date, float] = {}
+    for row in rows:
+        if len(row) < 3:
+            continue
+        day = _parse_date_any(row[0])
+        value = _clean_number(row[2])
+        if day is not None and value is not None:
+            result[day] = value
+    return result
 
 
 # ---------------------------------------------------------------------------
