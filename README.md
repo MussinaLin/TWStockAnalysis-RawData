@@ -302,6 +302,24 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
     `down_type=1`、`commodity_id=MTX`／`TMF`）。**區間上限約一個月**；**休市回只有表頭的 CSV**（不是 alert）；
     每列比表頭多一個尾逗號（程式以 `index_col=False` 讀，否則整列錯位）。當日 15:41 已有當日資料。
 
+#### 一次性回補（tools/backfill_mini_futures_oi.py）
+
+```bash
+# 預設只模擬：印目標 DB host、各商品範圍、請求數、將寫入天數、對不上的日期、失敗段
+python tools/backfill_mini_futures_oi.py
+# 確認目標 DB 後才寫
+python tools/backfill_mini_futures_oi.py --apply
+# 小台法人回「日期時間錯誤」（近三年邊界比預期晚）時，指定較晚的起日重跑
+python tools/backfill_mini_futures_oi.py --start 2023-12-01 --apply
+```
+
+- **範圍**：小台從今天往前 3 年起（法人端點只保留近三年），微台從上市日 2024-07-29 起；
+  都不早於 `market_daily` 最早日、到 `market_daily` 最晚日為止。
+- **請求數**：每個商品法人 1 次（整段）＋行情每個日曆月 1 次（行情端點一次最多一個月；三年約 36 次）。
+- **只 UPDATE 已存在的列、不 INSERT**（理由同 `--backfill-futures-oi`）。來源 `NULL` 不覆寫；非 `NULL` 直接覆寫
+  （歷史值是最終值）。法人失敗 → 該商品整個不補；某段行情失敗 → 印出該段、其餘照寫，重跑即可補上。
+- 目標 DB 取 `DATABASE_URL`（已 export 的優先，沒有才讀 `.env`）。結果冪等，可重複執行。
+
 ### 台指 VIX 與大盤當沖（market_daily）
 
 兩者都是「大盤見頂」的參考指標，併入 `market_daily` 的 daily 抓取，與其他子來源各自獨立失敗
