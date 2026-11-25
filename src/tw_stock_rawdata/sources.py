@@ -1496,16 +1496,17 @@ def fetch_taifex_vix_month(
 # ---------------------------------------------------------------------------
 
 
+@_retry_on_transient
 def fetch_mis_etf_snapshot(session: requests.Session) -> list[dict]:
     """抓 MIS「ETF 即時淨值揭露」的當下快照，攤平成每檔一個 dict（原樣不轉型）。
 
     欄位：a 代號、b 名稱、c 已發行受益權單位數、d 與前日單位差異、e 成交價、f 預估淨值、
     g 預估折溢價、h 前一營業日單位淨值、i 資料日期（YYYYMMDD）、j 時間。同一份回應裡
     數值有的是 JSON number、有的是字串，轉型交給 prepare_mis_etf_rows。只有當下快照，
-    沒有歷史。
+    沒有歷史，也沒有回補路徑，所以和其他每日整批抓取一樣用長窗口重試吸收暫時性錯誤。
 
     Raises:
-        DataUnavailableError: 回應不是物件、`a1` 不是 list、或攤平後沒有任何一檔。
+        DataUnavailableError: 回應不是物件、`a1` 不是 list、或攤平後沒有任何一檔（不重試）。
     """
     payload = _http_get(session, TWSE_MIS_ALL_ETF_URL).json()
     if not isinstance(payload, dict) or not isinstance(payload.get("a1"), list):

@@ -59,3 +59,25 @@ def test_fetch_flattens_msg_array() -> None:
 def test_fetch_bad_shape_raises(payload) -> None:
     with pytest.raises(DataUnavailableError):
         fetch_mis_etf_snapshot(FakeSession(payload=payload))
+
+
+def test_fetch_retries_transient_connection_error(monkeypatch) -> None:
+    """MIS 只有當下快照、沒有回補路徑：暫時性斷線要重試，不能讓當天規模永久缺漏。"""
+    import requests
+
+    from tests.conftest import FakeResponse
+    from tw_stock_rawdata import sources
+
+    monkeypatch.setattr(sources.time, "sleep", lambda *_: None)
+    payload = {"a1": [{"msgArray": ENTRIES[:1]}]}
+
+    class FlakySession(FakeSession):
+        def get(self, url, params=None, timeout=None, verify=None, **kwargs):
+            self.calls.append((url, dict(params or {})))
+            if len(self.calls) == 1:
+                raise requests.ConnectionError("reset")
+            return FakeResponse(payload=payload)
+
+    session = FlakySession()
+    assert fetch_mis_etf_snapshot(session) == ENTRIES[:1]
+    assert len(session.calls) == 2
