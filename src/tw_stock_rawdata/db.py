@@ -192,6 +192,29 @@ ALTER TABLE stock_holder_percent ADD COLUMN IF NOT EXISTS retail_ratio NUMERIC(8
 CREATE INDEX IF NOT EXISTS idx_holder_percent_trade_date
     ON stock_holder_percent (trade_date);
 
+-- etfs：要追蹤規模與受益人數的 ETF 清單（手動維護，見 README「ETF 規模與受益人數」）。
+CREATE TABLE IF NOT EXISTS etfs (
+    symbol        VARCHAR(10) PRIMARY KEY,
+    name          VARCHAR(50) NOT NULL DEFAULT '',
+    enabled       BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_time  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_time  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- etf_daily：ETF 每日規模（daily，TWSE MIS all_etf.txt）與每週受益人數（--dahu，TDCC）。
+-- 一列可能只有部分欄位：TDCC 週資料日只有 holders、月規模回補列只有 aum_100m。
+CREATE TABLE IF NOT EXISTS etf_daily (
+    symbol        VARCHAR(10)   NOT NULL,
+    trade_date    DATE          NOT NULL,
+    units         BIGINT,         -- 已發行受益權單位數（MIS c）
+    nav           NUMERIC(12,4),  -- 前一營業日單位淨值（MIS h）
+    aum_100m      NUMERIC(12,2),  -- 規模（億元）= units × nav ÷ 1e8；月底回補列取 e添富月規模
+    holders       INTEGER,        -- 受益人數（TDCC 分散表合計人數；只有週資料日有值）
+    created_time  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_time  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (symbol, trade_date)
+);
+
 -- 既有資料庫的線上 migration：補上後加的漲跌停欄（idempotent）。
 ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS limit_up   NUMERIC(12,2);
 ALTER TABLE stock_daily_raw ADD COLUMN IF NOT EXISTS limit_down NUMERIC(12,2);
@@ -235,6 +258,18 @@ BEGIN
         SELECT 1 FROM pg_trigger WHERE tgname = 'trg_holder_percent_updated'
     ) THEN
         CREATE TRIGGER trg_holder_percent_updated BEFORE UPDATE ON stock_holder_percent
+            FOR EACH ROW EXECUTE FUNCTION update_updated_time();
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger WHERE tgname = 'trg_etfs_updated'
+    ) THEN
+        CREATE TRIGGER trg_etfs_updated BEFORE UPDATE ON etfs
+            FOR EACH ROW EXECUTE FUNCTION update_updated_time();
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger WHERE tgname = 'trg_etf_daily_updated'
+    ) THEN
+        CREATE TRIGGER trg_etf_daily_updated BEFORE UPDATE ON etf_daily
             FOR EACH ROW EXECUTE FUNCTION update_updated_time();
     END IF;
 END $$;

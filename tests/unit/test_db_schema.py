@@ -78,3 +78,37 @@ def test_day_trade_column_has_online_migration(col: str, ddl: str) -> None:
     assert re.search(
         rf"ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS {col}\s+{ddl};", _SCHEMA_SQL
     )
+
+
+# ---------------------------------------------------------------------------
+# etfs / etf_daily（熱門 ETF 規模與受益人數）
+# ---------------------------------------------------------------------------
+
+_ETF_DAILY_DDL = {
+    "units": r"BIGINT",
+    "nav": r"NUMERIC\(12,4\)",
+    "aum_100m": r"NUMERIC\(12,2\)",
+    "holders": r"INTEGER",
+}
+
+
+@pytest.mark.parametrize("col,typ", _ETF_DAILY_DDL.items())
+def test_etf_daily_columns(col: str, typ: str) -> None:
+    assert re.search(rf"^\s*{col}\s+{typ},", _create_table_body("etf_daily"), re.M)
+
+
+def test_etf_daily_primary_key() -> None:
+    assert "PRIMARY KEY (symbol, trade_date)" in _create_table_body("etf_daily")
+
+
+def test_etfs_table() -> None:
+    body = _create_table_body("etfs")
+    assert re.search(r"^\s*symbol\s+VARCHAR\(10\)\s+PRIMARY KEY,", body, re.M)
+    assert re.search(r"^\s*enabled\s+BOOLEAN\s+NOT NULL DEFAULT TRUE,", body, re.M)
+
+
+@pytest.mark.parametrize(
+    "trg,table", [("trg_etfs_updated", "etfs"), ("trg_etf_daily_updated", "etf_daily")]
+)
+def test_etf_updated_time_triggers(trg: str, table: str) -> None:
+    assert re.search(rf"tgname = '{trg}'.*?BEFORE UPDATE ON {table}\s", _SCHEMA_SQL, re.S)

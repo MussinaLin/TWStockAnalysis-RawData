@@ -7,7 +7,7 @@
 本 repo 只負責：
 
 - 從 TWSE / TPEX / MoneyDJ / TDCC / TAIFEX（期交所）抓 raw data
-- 寫入 PostgreSQL：`stocks`、`stock_daily_raw`、`market_daily`、`stock_holder_percent`
+- 寫入 PostgreSQL：`stocks`、`stock_daily_raw`、`market_daily`、`stock_holder_percent`、`etfs`、`etf_daily`
 
 不負責：技術指標、選股、賣出警示、Telegram 通知（由下游 TWStockAnalysis 負責）。
 
@@ -427,6 +427,33 @@ VALUES ('00981A', '主動統一台股增長', 'twse', TRUE, FALSE);
   公司基本資料不提供）。
 - `insti_holding_pct` / `trust_holding_pct` 為 `NULL`：MoneyDJ 對 ETF 的法人持股比重
   給 `--`；`foreign_holding_pct` 與三大法人買賣超照常有值。
+
+### ETF 規模與受益人數（etfs / etf_daily）
+
+記錄幾檔熱門上市 ETF 的規模（每天）與受益人數（每週），給人查看用，不供下游判斷。
+與上一節的 `stocks` 無關：ETF 不必在 `stocks` 裡也能追蹤。
+
+**清單 `etfs`**（手動維護，改清單不需改程式或重新部署）：
+
+```sql
+INSERT INTO etfs (symbol, name) VALUES
+    ('0050', '元大台灣50'), ('0056', '元大高股息'), ('00878', '國泰永續高股息'),
+    ('00919', '群益台灣精選高息'), ('00981A', '主動統一台股增長'), ('00403A', '主動統一升級50')
+ON CONFLICT (symbol) DO NOTHING;
+-- 停止追蹤：UPDATE etfs SET enabled = FALSE WHERE symbol = '...';
+```
+
+**資料 `etf_daily`**（PK `(symbol, trade_date)`）：
+
+| 欄位 | 意義 |
+|---|---|
+| `units` | 已發行受益權單位數 |
+| `nav` | 前一營業日單位淨值 |
+| `aum_100m` | 規模（億元）= `units × nav ÷ 1e8`；月底回補的列取 e添富「月規模」 |
+| `holders` | 受益人數（TDCC 集保戶股權分散表「合計」人數），只有 TDCC 週資料日有值 |
+
+一列可能只有部分欄位（週資料日只有 `holders`、月規模回補列只有 `aum_100m`）。
+寫入一律 upsert + `COALESCE`，各來源寫同一列時互不蓋掉。
 
 ### OHLCV 來源順序（逐檔請求最小化）
 
