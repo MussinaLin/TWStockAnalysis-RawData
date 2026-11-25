@@ -7,6 +7,7 @@ import datetime as dt
 import pandas as pd
 
 from tw_stock_rawdata.prepare import (
+    prepare_tdcc_holder_count,
     prepare_tdcc_major_ratio,
     prepare_tdcc_retail_ratio,
 )
@@ -256,3 +257,31 @@ class TestResolveDahuDates:
             self._DATES, dt.date(2026, 5, 25), dt.date(2026, 5, 10)
         )
         assert result == [dt.date(2026, 5, 15), dt.date(2026, 5, 22)]
+
+
+class TestPrepareHolderCount:
+    """受益人數／股東人數 = 分散表「合計」列的人數（ETF 寫 etf_daily.holders）。"""
+
+    def test_real_sample_total_row(self) -> None:
+        assert prepare_tdcc_holder_count(_SAMPLE_6147) == 109520
+
+    def test_etf_total_row_float(self) -> None:
+        df = pd.DataFrame({"序": [15, 16, 17],
+                           "持股/單位數分級": ["1,000,001以上", "差異數調整（說明4）", "合　計"],
+                           "人數": [302.0, None, 4038137.0]})
+        assert prepare_tdcc_holder_count(df) == 4038137
+
+    def test_comma_string_count(self) -> None:
+        df = pd.DataFrame({"持股/單位數分級": ["合計"], "人數": ["4,038,137"]})
+        assert prepare_tdcc_holder_count(df) == 4038137
+
+    def test_missing_total_row(self) -> None:
+        df = pd.DataFrame({"持股/單位數分級": ["1-999"], "人數": [1.0]})
+        assert prepare_tdcc_holder_count(df) is None
+
+    def test_missing_count_column(self) -> None:
+        assert prepare_tdcc_holder_count(pd.DataFrame({"持股/單位數分級": ["合　計"]})) is None
+
+    def test_unparseable_count(self) -> None:
+        df = pd.DataFrame({"持股/單位數分級": ["合　計"], "人數": [None]})
+        assert prepare_tdcc_holder_count(df) is None

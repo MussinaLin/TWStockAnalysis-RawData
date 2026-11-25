@@ -38,7 +38,7 @@ def _dist() -> pd.DataFrame:
 @pytest.fixture
 def wiring(monkeypatch):
     """把所有外部相依換成可觀測的假物件，回傳呼叫紀錄。"""
-    calls = {"upserts": [], "fetches": [], "tokens": 0}
+    calls = {"upserts": [], "fetches": [], "tokens": 0, "etfs": [], "etf_upserts": []}
 
     monkeypatch.setattr(run, "load_stock_names", lambda url: {"2330": "台積電"})
     monkeypatch.setattr(run, "get_enabled_stocks", lambda url: [("2330", "台積電"), ("2317", "鴻海")])
@@ -62,6 +62,16 @@ def wiring(monkeypatch):
         return len(rows)
 
     monkeypatch.setattr(run, "upsert_holder_percent", fake_upsert)
+
+    # ETF 受益人數：預設沒有啟用的 ETF，既有測試的行為不變。
+    monkeypatch.setattr(run, "get_enabled_etfs", lambda url: calls["etfs"])
+    monkeypatch.setattr(run, "prepare_tdcc_holder_count", lambda d: 1000)
+
+    def fake_etf_upsert(url, rows):
+        calls["etf_upserts"].append(list(rows))
+        return len(rows)
+
+    monkeypatch.setattr(run, "upsert_etf_daily", fake_etf_upsert)
     monkeypatch.setattr(run.time, "sleep", lambda _s: None)
     return calls
 
@@ -183,3 +193,65 @@ def test_token_refresh_failure_does_not_abort_retry_loop(monkeypatch, wiring) ->
     assert calls["n"] == 1 + run._TDCC_MAX_ATTEMPTS
     _, rows = wiring["upserts"][0]
     assert rows == []
+
+
+
+class TestEtfHolders:
+    """ETF 受益人數併入同一個迴圈：每個代號每個日期只打 1 次 TDCC。"""
+
+    def test_etf_only_symbol_writes_etf_daily_only(self, wiring) -> None:
+        wiring["etfs"] = [("0050", "元大台灣50")]
+        run._dahu_command(None, CONFIG, _args(from_date="2026-08-01", to_date="2026-08-31"), D2)
+        assert [c for c in wiring["fetches"] if c[0] == "0050"] == [("0050", D1), ("0050", D2)]
+        for _date, rows in wiring["upserts"]:
+            assert [r[0] for r in rows] == ["2330", "2317"]
+        assert wiring["etf_upserts"] == [
+            [{"symbol": "0050", "trade_date": D1, "holders": 1000}],
+            [{"symbol": "0050", "trade_date": D2, "holders": 1000}],
+        ]
+
+    def test_symbol_in_both_fetched_once(self, wiring) -> None:
+        wiring["etfs"] = [("2330", "台積電")]
+        run._dahu_command(None, CONFIG, _args(), D2)
+        assert [c for c in wiring["fetches"] if c[0] == "2330"] == [("2330", D2)]
+        _, rows = wiring["upserts"][0]
+        assert [r[0] for r in rows] == ["2330", "2317"]
+        assert wiring["etf_upserts"] == [[{"symbol": "2330", "trade_date": D2, "holders": 1000}]]
+
+    def test_explicit_stocks_with_etf(self, wiring) -> None:
+        wiring["etfs"] = [("0050", "元大台灣50")]
+        run._dahu_command(None, CONFIG, _args(stocks="0050,2330"), D2)
+        assert sorted(s for s, _ in wiring["fetches"]) == ["0050", "2330"]
+        _, rows = wiring["upserts"][0]
+        assert [r[0] for r in rows] == ["2330"]
+        assert wiring["etf_upserts"] == [[{"symbol": "0050", "trade_date": D2, "holders": 1000}]]
+
+    def test_explicit_etf_that_is_also_a_stock(self, wiring, monkeypatch) -> None:
+        monkeypatch.setattr(run, "load_stock_names", lambda url: {"00981A": "主動統一台股增長"})
+        wiring["etfs"] = [("00981A", "主動統一台股增長")]
+        run._dahu_command(None, CONFIG, _args(stocks="00981A"), D2)
+        assert wiring["fetches"] == [("00981A", D2)]
+        _, rows = wiring["upserts"][0]
+        assert [r[0] for r in rows] == ["00981A"]
+        assert len(wiring["etf_upserts"]) == 1
+
+    def test_holder_parse_failure_skips_etf(self, wiring, monkeypatch, capsys) -> None:
+        wiring["etfs"] = [("0050", "元大台灣50")]
+        monkeypatch.setattr(run, "prepare_tdcc_holder_count", lambda d: None)
+        run._dahu_command(None, CONFIG, _args(), D2)
+        assert wiring["etf_upserts"] == []
+        assert "無法解析受益人數" in capsys.readouterr().out
+
+    def test_only_etfs_enabled_still_runs(self, wiring, monkeypatch) -> None:
+        monkeypatch.setattr(run, "get_enabled_stocks", lambda url: [])
+        wiring["etfs"] = [("0050", "元大台灣50")]
+        run._dahu_command(None, CONFIG, _args(), D2)
+        assert wiring["fetches"] == [("0050", D2)]
+        assert wiring["etf_upserts"] == [[{"symbol": "0050", "trade_date": D2, "holders": 1000}]]
+
+    def test_etf_failure_does_not_block_stock_ratio(self, wiring, monkeypatch) -> None:
+        """ETF 只要受益人數；大戶比例解析失敗不影響 ETF-only 代號。"""
+        monkeypatch.setattr(run, "prepare_tdcc_major_ratio", lambda d: None)
+        wiring["etfs"] = [("0050", "元大台灣50")]
+        run._dahu_command(None, CONFIG, _args(), D2)
+        assert wiring["etf_upserts"] == [[{"symbol": "0050", "trade_date": D2, "holders": 1000}]]

@@ -53,6 +53,7 @@ from .prepare import (
     prepare_moneydj_holding_pct,
     prepare_moneydj_insti,
     prepare_moneydj_margin,
+    prepare_tdcc_holder_count,
     prepare_tdcc_major_ratio,
     prepare_tdcc_retail_ratio,
     prepare_tpex_3insti,
@@ -292,23 +293,38 @@ def _dahu_command(
     args: argparse.Namespace,
     today: dt.date,
 ) -> None:
-    """--dahu：更新大戶持股佔比（TDCC 集保戶股權分散表），其他資料不更新。"""
-    db_url = config.database_url
+    """--dahu：更新大戶持股佔比與 ETF 受益人數（TDCC 集保戶股權分散表），其他資料不更新。
 
-    # 決定目標股票
+    個股寫 stock_holder_percent；etfs 清單內的 ETF 另把「合計」人數寫進 etf_daily.holders。
+    同時在兩個清單的代號（如 00981A）每個日期只打 1 次 TDCC，兩邊都寫；只在 etfs、
+    不在 stocks 的代號不寫 stock_holder_percent。
+    """
+    db_url = config.database_url
+    etf_set = {symbol for symbol, _ in get_enabled_etfs(db_url)}
+
+    # 決定目標：holdings 寫 stock_holder_percent、etf_targets 寫 etf_daily.holders
     if args.stocks:
         symbols = [s.strip() for s in args.stocks.split(",") if s.strip()]
         if not symbols:
             print("錯誤：--stocks 未指定任何股票代號")
             return
         name_map = load_stock_names(db_url)
-        holdings = [(s, name_map.get(s, "")) for s in symbols]
+        holdings = [
+            (s, name_map.get(s, "")) for s in symbols
+            if not (s in etf_set and s not in name_map)
+        ]
+        etf_targets = [s for s in symbols if s in etf_set]
     else:
         enabled_rows = get_enabled_stocks(db_url)
-        if not enabled_rows:
+        if not enabled_rows and not etf_set:
             print("錯誤：資料庫中無啟用的股票（stocks.enabled = TRUE）")
             return
         holdings = [(r[0], r[1]) for r in enabled_rows]
+        etf_targets = sorted(etf_set)
+
+    stock_names = dict(holdings)
+    etf_target_set = set(etf_targets)
+    fetch_symbols = [s for s, _ in holdings] + [s for s in etf_targets if s not in stock_names]
 
     # 解析區間（若有）
     from_date = _parse_date(args.from_date) if args.from_date else None
@@ -327,24 +343,39 @@ def _dahu_command(
         return
 
     print(
-        f"更新大戶持股佔比：{len(holdings)} 檔 × {len(target_dates)} 個日期"
-        f"（{target_dates[0]} ~ {target_dates[-1]}）"
+        f"更新大戶持股佔比：{len(holdings)} 檔、ETF 受益人數：{len(etf_targets)} 檔"
+        f" × {len(target_dates)} 個日期（{target_dates[0]} ~ {target_dates[-1]}）"
     )
 
-    total_stocks = len(holdings)
+    total = len(fetch_symbols)
     for date in target_dates:
         rows: list[tuple[str, str | None, float | None, float | None]] = []
+        etf_rows: list[dict] = []
         n_failed = 0
-        for idx, (symbol, name) in enumerate(holdings):
-            print(f"  {date.isoformat()} {idx + 1}/{total_stocks} {symbol}")
+        n_etf_failed = 0
+        for idx, symbol in enumerate(fetch_symbols):
+            print(f"  {date.isoformat()} {idx + 1}/{total} {symbol}")
+            is_stock = symbol in stock_names
+            is_etf = symbol in etf_target_set
             dist, token, last_exc = _fetch_tdcc_with_retry(session, token, symbol, date)
             if dist is None:
-                n_failed += 1
+                n_failed += is_stock
+                n_etf_failed += is_etf
                 print(
                     f"    {symbol} TDCC 取得失敗（重試 {_TDCC_MAX_ATTEMPTS} 次）：{last_exc}"
                 )
                 continue
 
+            if is_etf:
+                holders = prepare_tdcc_holder_count(dist)
+                if holders is None:
+                    n_etf_failed += 1
+                    print(f"    {symbol} 無法解析受益人數")
+                else:
+                    etf_rows.append({"symbol": symbol, "trade_date": date, "holders": holders})
+
+            if not is_stock:
+                continue
             ratio = prepare_tdcc_major_ratio(dist)
             if ratio is None:
                 n_failed += 1
@@ -352,12 +383,17 @@ def _dahu_command(
                 continue
             # 散戶比例以同一份分散表解析；偶發 None 不擋寫（COALESCE 保護歷史值）。
             retail = prepare_tdcc_retail_ratio(dist)
-            rows.append((symbol, name or None, ratio, retail))
+            rows.append((symbol, stock_names[symbol] or None, ratio, retail))
 
         n_written = upsert_holder_percent(db_url, date, rows)
         print(
             f"  {date.isoformat()} 大戶/散戶持股佔比已寫入 {n_written} 筆，失敗 {n_failed} 筆"
         )
+        if etf_targets:
+            n_etf = upsert_etf_daily(db_url, etf_rows) if etf_rows else 0
+            print(
+                f"  {date.isoformat()} ETF 受益人數已寫入 {n_etf} 筆，失敗 {n_etf_failed} 筆"
+            )
 
 
 def _is_daily_mode(args: argparse.Namespace) -> bool:

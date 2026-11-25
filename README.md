@@ -79,8 +79,8 @@ tw-stock-rawdata --backfill-start ... --backfill-end ... --force
 # 刷新 stocks.issued_shares
 tw-stock-rawdata --update-shares
 
-# 更新大戶/散戶持股佔比（TDCC 集保戶股權分散表，每週一次；只更新此資料，其他不動）
-# 預設只抓最新一筆週資料
+# 更新大戶/散戶持股佔比與 ETF 受益人數（TDCC 集保戶股權分散表，每週一次；只更新此資料，其他不動）
+# 預設只抓最新一筆週資料；對象 = 啟用個股 + etfs 清單的 ETF
 tw-stock-rawdata --dahu
 
 # 只更新特定股票
@@ -93,6 +93,8 @@ tw-stock-rawdata --dahu --from 2026-05-01 --to 2026-05-31
 > 大戶持股佔比 = 持股 400 張（> 400,000 股）以上占集保庫存數比例，存於 `stock_holder_percent.major_ratio`（小數，如 0.7572）。
 >
 > 散戶持股佔比 = 持股小於 20 張（<= 20,000 股）占集保庫存數比例，存於 `stock_holder_percent.retail_ratio`（小數，如 0.1520）。兩者皆以 TDCC 分級下界判定，故以「整個級距」分類。
+>
+> ETF 受益人數 = 同一張分散表「合計」列的人數，存於 `etf_daily.holders`（見「ETF 規模與受益人數」一節）。
 
 ### 漲跌停價（limit_up / limit_down）
 
@@ -466,6 +468,20 @@ ON CONFLICT (symbol) DO NOTHING;
   （MIS 沒有歷史）。
 - 資料日期不是今天、清單代號不在 MIS、單位數或淨值不是正數 → 該檔不寫，印
   `⚠ ETF <代號> 規模未寫入：<原因>`。抓取或寫入失敗只印 log，不讓 daily 失敗。
+
+**受益人數：`--dahu` 每週寫**
+
+- 來源：TDCC 集保戶股權分散表「合計」列的人數（e添富顯示的受益人次就是這個數字，所以只有每週一筆）。
+- `--dahu` 的對象 = 啟用個股 ∪ 啟用 ETF；給 `--stocks` 時就是指定的代號。每個代號每個日期只打 1 次 TDCC：
+  - 在 `etfs` → 寫 `etf_daily.holders`。
+  - 只在 `etfs`、不在 `stocks` 的代號**不寫** `stock_holder_percent`；同時在兩邊的（如 00981A）兩邊都寫。
+- 歷史回補（TDCC 只能查最近約 51 週）：
+
+  ```bash
+  tw-stock-rawdata --dahu --stocks 0050,0056,00878,00919,00981A,00403A --from 2025-11-28 --to 2026-11-20
+  ```
+
+  上市晚於區間起日的 ETF（如 00403A，2026-05 上市），上市前的週查不到資料，會重試後跳過，屬預期。
 
 ### OHLCV 來源順序（逐檔請求最小化）
 

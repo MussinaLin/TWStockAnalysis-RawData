@@ -1006,6 +1006,22 @@ def prepare_tdcc_retail_ratio(df: pd.DataFrame) -> float | None:
     return _sum_grade_ratio(df, lambda lower: lower <= _RETAIL_HOLDER_MAX_SHARES)
 
 
+def prepare_tdcc_holder_count(df: pd.DataFrame) -> int | None:
+    """取 TDCC 集保戶股權分散表「合計」列的人數（ETF 即受益人數）。
+
+    「持股/單位數分級」欄去掉所有空白（含全形空白，TDCC 寫成「合　計」）後等於「合計」
+    的那列。找不到欄、找不到該列或人數無法解析 → None。
+    """
+    grade_col = _find_column(df, ["持股"])
+    count_col = _find_column(df, ["人數"])
+    if not grade_col or not count_col:
+        return None
+    for _, row in df.iterrows():
+        if re.sub(r"\s", "", str(row[grade_col])) == "合計":
+            return _clean_int(row[count_col])
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 個股月表展開
 #
