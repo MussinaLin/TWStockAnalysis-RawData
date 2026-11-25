@@ -23,6 +23,7 @@ from .db_utils import (
     find_next_market_trade_date,
     find_prev_market_trade_date,
     get_config_value,
+    get_enabled_etfs,
     get_enabled_stocks,
     load_market_dates_in_range,
     load_market_types,
@@ -39,6 +40,7 @@ from .db_utils import (
     update_market_vix_batch,
     update_trust_holding_batch,
     upsert_daily_raw,
+    upsert_etf_daily,
     upsert_holder_percent,
     upsert_market_daily,
     upsert_stock_shares,
@@ -47,6 +49,7 @@ from .prepare import (
     expand_tpex_stock_day,
     expand_twse_stock_day,
     prepare_disposition,
+    prepare_mis_etf_rows,
     prepare_moneydj_holding_pct,
     prepare_moneydj_insti,
     prepare_moneydj_margin,
@@ -68,6 +71,7 @@ from .price_limit import calc_limits, is_etf
 from .sources import (
     DataUnavailableError,
     build_session,
+    fetch_mis_etf_snapshot,
     fetch_moneydj_holding_pct,
     fetch_taifex_txf_institutional,
     fetch_taifex_vix_close,
@@ -3059,6 +3063,34 @@ def _settle_market_day_trade(
         print(f"  大盤當沖統計校正失敗（DB）：{exc}")
 
 
+def _update_etf_daily(
+    session: requests.Session, config: AppConfig, today: dt.date
+) -> None:
+    """daily 收尾：寫入 etfs 清單內 ETF 的當日規模（TWSE MIS all_etf.txt，1 次請求）。
+
+    - MIS 只有當下快照、沒有歷史，所以只在 daily（target_date == today）跑，回補不跑。
+    - 資料日期不是今天（休市日手動跑、快照已換日）的檔不寫；逐檔印出沒寫入的原因。
+    - 規模口徑同 e添富：已發行單位數 × 前一營業日淨值（見 prepare_mis_etf_rows）。
+
+    收尾是附加動作，任何失敗只印 log，不讓 daily 以 traceback 結束。
+    """
+    try:
+        etfs = get_enabled_etfs(config.database_url)
+        if not etfs:
+            print("  ETF 規模略過：etfs 沒有啟用的 ETF")
+            return
+        entries = fetch_mis_etf_snapshot(session)
+        rows, problems = prepare_mis_etf_rows(entries, [s for s, _ in etfs], today)
+        for symbol, reason in problems.items():
+            print(f"  ⚠ ETF {symbol} 規模未寫入：{reason}")
+        n = upsert_etf_daily(config.database_url, rows) if rows else 0
+        print(f"  ETF 規模已寫入 {n} 檔（清單 {len(etfs)} 檔）")
+    except (DataUnavailableError, requests.RequestException) as exc:
+        print(f"  ETF 規模取得失敗：{exc}")
+    except Exception as exc:
+        print(f"  ETF 規模寫入失敗（DB）：{exc}")
+
+
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
@@ -3393,6 +3425,9 @@ def _main_inner(
     # daily：重抓往前第 3 個交易日的當沖統計（TWSE 以 T+2 為最終值）。歷史日不需要。
     if written and target_date == today:
         _settle_market_day_trade(session, config, target_date)
+    # daily：ETF 規模（MIS 只有當下快照）。不看 written：個股失敗不影響 ETF。
+    if target_date == today:
+        _update_etf_daily(session, config, today)
 
 
 if __name__ == "__main__":

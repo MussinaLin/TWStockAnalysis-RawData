@@ -68,6 +68,11 @@ def spies(monkeypatch):
         run, "_settle_market_day_trade",
         lambda session, config, today: calls["day_trade_settle_dates"].append(today),
     )
+    calls["etf_dates"] = []
+    monkeypatch.setattr(
+        run, "_update_etf_daily",
+        lambda session, config, today: calls["etf_dates"].append(today),
+    )
     monkeypatch.setattr(run, "_prefetch_margin_cache", spy("prefetch_margin", retval={}))
     monkeypatch.setattr(run, "_prefetch_holding_pct_cache", spy("prefetch_holding", retval={}))
     monkeypatch.setattr(run, "_fetch_disposition", spy("fetch_disposition", retval=None))
@@ -334,3 +339,26 @@ class TestSettleMarketDayTrade:
             CONFIG, _args(backfill_start="2026-08-17", backfill_end="2026-08-21"), TODAY, TODAY
         )
         assert spies["day_trade_settle_dates"] == []
+
+
+class TestEtfDaily:
+    """ETF 規模只在 daily（target_date == today）寫 1 次，不看個股是否寫入成功。"""
+
+    def test_daily_runs_etf_once(self, spies) -> None:
+        run._main_inner(CONFIG, _args(), TODAY, TODAY)
+        assert spies["etf_dates"] == [TODAY]
+
+    def test_runs_even_if_nothing_written(self, spies, monkeypatch) -> None:
+        monkeypatch.setattr(run, "_run_for_date", lambda *a, **k: False)
+        run._main_inner(CONFIG, _args(), TODAY, TODAY)
+        assert spies["etf_dates"] == [TODAY]
+
+    def test_historical_date_skips(self, spies) -> None:
+        run._main_inner(CONFIG, _args(date="2026-08-19"), TODAY, dt.date(2026, 8, 19))
+        assert spies["etf_dates"] == []
+
+    def test_backfill_skips(self, spies) -> None:
+        run._main_inner(
+            CONFIG, _args(backfill_start="2026-08-17", backfill_end="2026-08-21"), TODAY, TODAY
+        )
+        assert spies["etf_dates"] == []
