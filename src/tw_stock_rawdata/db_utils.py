@@ -767,6 +767,60 @@ def upsert_holder_percent(
     return len(params)
 
 
+# ---------------------------------------------------------------------------
+# etfs / etf_daily（熱門 ETF 規模與受益人數）
+# ---------------------------------------------------------------------------
+
+_ETF_DAILY_VALUE_COLS = ("units", "nav", "aum_100m", "holders")
+
+
+def get_enabled_etfs(database_url: str) -> list[tuple[str, str]]:
+    """回傳 etfs 清單中啟用的 (symbol, name)，依代號排序。"""
+    rows = _fetch_all(
+        database_url,
+        "SELECT symbol, name FROM etfs WHERE enabled = TRUE ORDER BY symbol",
+    )
+    return [(r[0], r[1]) for r in rows]
+
+
+def upsert_etf_daily(database_url: str, rows: list[dict]) -> int:
+    """Upsert etf_daily：每個值欄都 COALESCE，缺鍵視為 NULL、不覆寫既有值。
+
+    一列由多個來源各寫一部分：daily 寫 units / nav / aum_100m（MIS）、--dahu 寫
+    holders（TDCC）、月規模回補只寫 aum_100m，彼此不可互相蓋成 NULL。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        rows: dict 的鍵為 symbol、trade_date，加上 units / nav / aum_100m / holders 的任意子集。
+
+    Returns:
+        實際送出的 row 數（symbol 為空的列不算）。
+    """
+    params = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        params.append(
+            (symbol, row["trade_date"], *(_safe(row.get(c)) for c in _ETF_DAILY_VALUE_COLS))
+        )
+    if not params:
+        return 0
+
+    cols = ", ".join(_ETF_DAILY_VALUE_COLS)
+    updates = ", ".join(f"{c} = COALESCE(EXCLUDED.{c}, etf_daily.{c})" for c in _ETF_DAILY_VALUE_COLS)
+    sql = (
+        f"INSERT INTO etf_daily (symbol, trade_date, {cols})"
+        f" VALUES (%s, %s, {', '.join(['%s'] * len(_ETF_DAILY_VALUE_COLS))})"
+        f" ON CONFLICT (symbol, trade_date) DO UPDATE SET {updates}"
+    )
+    with _connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, params)
+        conn.commit()
+    return len(params)
+
+
 def _consensus_prev_trade_date(cur, before_date: dt.date) -> dt.date | None:
     """找 stock_daily_raw 與 market_daily 都同意的前一個交易日。
 
