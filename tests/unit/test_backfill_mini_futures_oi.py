@@ -71,3 +71,21 @@ def test_merge_updates_skips_db_dates_without_data() -> None:
     d1, d2 = date(2026, 11, 20), date(2026, 11, 23)
     updates, extra = script.merge_updates([d1, d2], {d1: {"mtx_market_oi": 3}})
     assert updates == [(d1, {"mtx_market_oi": 3})] and extra == []
+
+
+def test_main_stops_before_fetching_when_columns_missing(monkeypatch) -> None:
+    """還沒跑過新版 init_schema 的 DB（如部署前的 PROD）：模擬不能假綠燈、--apply 不能打完請求才炸。"""
+    import pytest
+
+    def boom(*a, **k):
+        raise AssertionError("欄位不存在時不該讀 DB 日期或打期交所")
+
+    monkeypatch.setattr(script, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@example.invalid:5432/db")
+    monkeypatch.setattr("sys.argv", ["backfill_mini_futures_oi.py"])
+    monkeypatch.setattr(script, "load_missing_mini_columns", lambda url: ["mtx_market_oi", "tmf_market_oi"])
+    monkeypatch.setattr(script, "load_market_dates_in_range", boom)
+    monkeypatch.setattr(script, "build_session", boom)
+    monkeypatch.setattr(script, "close_pool", lambda: None)
+    with pytest.raises(SystemExit, match="mtx_market_oi.*tw-stock-rawdata"):
+        script.main()

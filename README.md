@@ -1,6 +1,6 @@
 # TWStockAnalysis-RawData
 
-每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情、台指期三大法人未平倉、台指 VIX、上市大盤當沖統計），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
+每日抓取台股 raw data（OHLCV、三大法人、融資融券、外資/法人/投信持股比例、發行股數、處置股註記、大盤行情、台指期三大法人未平倉、小台／微台未平倉、台指 VIX、上市大盤當沖統計），寫入 PostgreSQL，供下游 [`TWStockAnalysis`](https://github.com/MussinaLin/TWStockAnalysis) 分析使用。
 
 ## 職責邊界
 
@@ -319,6 +319,8 @@ python tools/backfill_mini_futures_oi.py --start 2023-12-01 --apply
 - **只 UPDATE 已存在的列、不 INSERT**（理由同 `--backfill-futures-oi`）。來源 `NULL` 不覆寫；非 `NULL` 直接覆寫
   （歷史值是最終值）。法人失敗 → 該商品整個不補；某段行情失敗 → 印出該段、其餘照寫，重跑即可補上。
 - 目標 DB 取 `DATABASE_URL`（已 export 的優先，沒有才讀 `.env`）。結果冪等，可重複執行。
+- **先建欄再跑**：這支不建欄。目標 DB 要先跑過一次新版 `tw-stock-rawdata`（啟動時的 `init_schema` 會加這 6 欄）；
+  欄位不在時，模擬與 `--apply` 都會在打期交所之前直接停下並列出缺的欄位。
 
 ### 台指 VIX 與大盤當沖（market_daily）
 
@@ -624,7 +626,8 @@ HTML 頁面（MoneyDJ 融資融券／法人持股、TDCC 集保分布）的 `pd.
 - OHLCV fallback 鏈最後一環 `STOCK_DAY` 月表：`{symbol} STOCK_DAY 月表取得失敗：{原因}`
   （該檔 OHLCV 缺值寫 `NULL`）。
 - `market_daily` 的子來源各自印 `大盤 OHLC／大盤成交金額／大盤外資買賣超／大盤融資餘額／
-  台指期三大法人未平倉／台指 VIX／大盤當沖統計 取得失敗：{原因}`；daily 收尾的當沖校正失敗印
+  台指期三大法人未平倉／台指 VIX／大盤當沖統計 取得失敗：{原因}`，小台／微台印
+  `小台三大法人未平倉取得失敗`、`微台全市場未平倉取得失敗` 等（商品 × 來源各一）；daily 收尾的當沖校正失敗印
   `大盤當沖統計校正失敗`。包含「月表抓到了但沒有當日」（`MI_5MINS_HIST`、
   `FMTQIK`）與 TWSE `stat` 不是 `OK`（`BFI82U`、`MI_MARGN`，原因帶 `stat` 原文，限流字串
   看得出來）。這些欄寫成 `NULL` 後不會有流程回頭補（大盤當沖統計例外：daily 收尾會

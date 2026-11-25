@@ -28,11 +28,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+import psycopg
 import requests
 from dotenv import load_dotenv
 
 from tw_stock_rawdata.db import close_pool
-from tw_stock_rawdata.db_utils import load_market_dates_in_range, update_market_mini_futures_oi_batch
+from tw_stock_rawdata.db_utils import (
+    _MINI_FUTURES_OI_COLS,
+    load_market_dates_in_range,
+    update_market_mini_futures_oi_batch,
+)
 from tw_stock_rawdata.prepare import prepare_taifex_inst_long_short, prepare_taifex_market_oi
 from tw_stock_rawdata.sources import (
     MINI_FUTURES,
@@ -89,6 +94,18 @@ def merge_updates(
     return sorted(merged.items()), sorted(extra)
 
 
+def load_missing_mini_columns(database_url: str) -> list[str]:
+    """market_daily 還沒有的小台／微台欄位（DB 還沒跑過新版 init_schema 時非空）。"""
+    with psycopg.connect(database_url) as conn:
+        conn.read_only = True
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'market_daily'"
+        ).fetchall()
+    existing = {r[0] for r in rows}
+    return [c for c in _MINI_FUTURES_OI_COLS if c not in existing]
+
+
 def _fmt(dates: list[dt.date], limit: int = 10) -> str:
     shown = "、".join(map(str, dates[:limit]))
     return shown + (f" …（共 {len(dates)} 天）" if len(dates) > limit else "")
@@ -112,6 +129,15 @@ def main() -> None:
         raise SystemExit("沒有 DATABASE_URL")
     target = urlparse(database_url)
     print(f"目標 DB：{target.hostname}:{target.port}{target.path}")
+
+    # 欄位由 tw-stock-rawdata 的 init_schema 建立；這支不建欄。先檢查，免得模擬顯示可寫、
+    # --apply 打完幾十次期交所請求後才因欄位不存在失敗。
+    missing = load_missing_mini_columns(database_url)
+    if missing:
+        raise SystemExit(
+            f"market_daily 缺少欄位 {'、'.join(missing)}：先在這個 DB 跑一次新版 tw-stock-rawdata"
+            "（啟動時的 init_schema 會建欄）再執行"
+        )
 
     today = dt.datetime.now(TAIPEI_TZ).date()
     try:
