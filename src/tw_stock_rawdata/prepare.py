@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import pandas as pd
 
@@ -1142,3 +1143,62 @@ def prepare_taifex_txf_oi(df: pd.DataFrame) -> dict[dt.date, dict[str, int | Non
             if all(p is not None for p in parts):
                 day[f"txf_total_oi_net{suffix}"] = sum(parts)
     return out
+
+
+# ---------------------------------------------------------------------------
+# ETF 規模（TWSE MIS all_etf.txt）
+# ---------------------------------------------------------------------------
+
+_NAV_QUANT = Decimal("0.0001")
+_AUM_QUANT = Decimal("0.01")
+_HUNDRED_MILLION = Decimal(100_000_000)
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    """MIS 的數值（number 或字串，可能是 '-'、空字串）轉成正的 Decimal；不合理回 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = Decimal(str(value).replace(",", "").strip())
+    except InvalidOperation:
+        return None
+    return out if out.is_finite() and out > 0 else None
+
+
+def prepare_mis_etf_rows(
+    entries: list[dict], symbols: list[str], trade_date: dt.date
+) -> tuple[list[dict], dict[str, str]]:
+    """從 MIS 快照挑出清單內的 ETF，轉成 etf_daily 的 units / nav / aum_100m。
+
+    規模口徑同 e添富：已發行單位數 × 前一營業日淨值 ÷ 1e8（億元，四捨五入到 0.01）。
+    資料日期 `i` 不是 trade_date 的不寫（休市日手動跑、快照已換日）。
+
+    Returns:
+        (rows, problems)：rows 依 symbols 順序；problems 為 {代號: 沒寫入的原因}。
+    """
+    by_symbol = {str(e.get("a", "")).strip(): e for e in entries}
+    expected = trade_date.strftime("%Y%m%d")
+    rows: list[dict] = []
+    problems: dict[str, str] = {}
+    for symbol in symbols:
+        entry = by_symbol.get(symbol)
+        if entry is None:
+            problems[symbol] = "MIS 沒有此代號"
+            continue
+        data_date = str(entry.get("i", "")).strip()
+        if data_date != expected:
+            problems[symbol] = f"MIS 資料日期 {data_date or '（空）'} 不是 {expected}"
+            continue
+        units = _positive_decimal(entry.get("c"))
+        nav = _positive_decimal(entry.get("h"))
+        if units is None or nav is None or units != units.to_integral_value():
+            problems[symbol] = f"單位數或淨值無效（c={entry.get('c')!r}、h={entry.get('h')!r}）"
+            continue
+        rows.append({
+            "symbol": symbol,
+            "trade_date": trade_date,
+            "units": int(units),
+            "nav": nav.quantize(_NAV_QUANT, rounding=ROUND_HALF_UP),
+            "aum_100m": (units * nav / _HUNDRED_MILLION).quantize(_AUM_QUANT, rounding=ROUND_HALF_UP),
+        })
+    return rows, problems

@@ -51,6 +51,8 @@ TAIFEX_VIX_DAILY_URL = "https://www.taifex.com.tw/cht/7/getVixData"
 TAIFEX_VIX_MONTH_URL = (
     "https://www.taifex.com.tw/file/taifex/Dailydownload/vix/log2data/{yyyymm}new.txt"
 )
+# ETF 即時淨值揭露（1 次回全部 ETF 的當下快照：已發行單位數、前一營業日淨值）。
+TWSE_MIS_ALL_ETF_URL = "https://mis.twse.com.tw/stock/data/all_etf.txt"
 MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
 MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
 TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
@@ -1483,6 +1485,35 @@ def fetch_taifex_vix_month(
         if day is not None and value is not None:
             result[day] = value
     return result
+
+
+# ---------------------------------------------------------------------------
+# ETF 規模（TWSE MIS all_etf.txt）
+# ---------------------------------------------------------------------------
+
+
+def fetch_mis_etf_snapshot(session: requests.Session) -> list[dict]:
+    """抓 MIS「ETF 即時淨值揭露」的當下快照，攤平成每檔一個 dict（原樣不轉型）。
+
+    欄位：a 代號、b 名稱、c 已發行受益權單位數、d 與前日單位差異、e 成交價、f 預估淨值、
+    g 預估折溢價、h 前一營業日單位淨值、i 資料日期（YYYYMMDD）、j 時間。同一份回應裡
+    數值有的是 JSON number、有的是字串，轉型交給 prepare_mis_etf_rows。只有當下快照，
+    沒有歷史。
+
+    Raises:
+        DataUnavailableError: 回應不是物件、`a1` 不是 list、或攤平後沒有任何一檔。
+    """
+    payload = _http_get(session, TWSE_MIS_ALL_ETF_URL).json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("a1"), list):
+        raise DataUnavailableError("MIS all_etf.txt 回應格式異常（沒有 a1 陣列）")
+    entries = [
+        entry
+        for block in payload["a1"] if isinstance(block, dict)
+        for entry in (block.get("msgArray") or []) if isinstance(entry, dict)
+    ]
+    if not entries:
+        raise DataUnavailableError("MIS all_etf.txt 沒有任何 ETF 資料")
+    return entries
 
 
 # ---------------------------------------------------------------------------
