@@ -42,6 +42,7 @@ tw-stock-rawdata --backfill-vix --backfill-start ... --backfill-end ...  # 只�
 tw-stock-rawdata --update-shares      # 只刷新 stocks.issued_shares
 tw-stock-rawdata --dahu               # 每週：大戶/散戶持股佔比 + etfs 清單的 ETF 受益人數（TDCC）
 python tools/backfill_etf_month_aum.py [--apply]  # 一次性：ETF 近 12 個月月底規模（e添富，只補 NULL）
+python tools/backfill_mini_futures_oi.py [--start YYYY-MM-DD] [--apply]  # 一次性：小台／微台未平倉 6 欄（只 UPDATE）
 
 # 測試
 pytest tests/unit/
@@ -65,7 +66,8 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 - `stock_daily_raw` — 每日逐檔 raw（PK `(symbol, trade_date)`，**按年 RANGE partition**）
   含處置股註記 `is_disposition` / `disposition_match_minutes`（語意見 README）
 - `market_daily` — 大盤每日行情（trade_date PK），含台指期（大台）三大法人未平倉淨額 `txf_*`、
-  台指 VIX 收盤值 `tw_vix_close`、上市大盤當沖統計 `day_trade_*`
+  台指 VIX 收盤值 `tw_vix_close`、上市大盤當沖統計 `day_trade_*`、小台／微台全市場與三大法人多空單
+  未平倉 `mtx_*`／`tmf_*`（原始口數，散戶多空比由下游算）
 - `stock_holder_percent` — 每週大戶／散戶持股佔比（`--dahu`，TDCC）
 - `etfs` — 要追蹤的 ETF 清單（手動維護）；`etf_daily` — ETF 每日規模（daily，MIS 快照）
   與每週受益人數（`--dahu`），PK `(symbol, trade_date)`，一列可能只有部分欄位
@@ -116,3 +118,8 @@ PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo �
 - **當沖統計校正只在 daily 做 1 次、對象是 DB 往前第 3 個交易日**（`_settle_market_day_trade`）：
   TWSE 以 T+2 為最終值，但 T+2 更新與 22:00 的 daily 幾乎同時，**不要**改成第 2 個；也**不要**
   改成回補每天都做（舊日期抓到的已是最終值，回補 N 天就多打 N 次 TWSE）。
+- **小台／微台未平倉（`mtx_*`／`tmf_*`）的兩個期交所端點規則不同**：法人 `futContractsDateDown` 小台代碼是
+  `MXF`（填 `MTX` 回「查無資料」）、只保留近三年；行情 `futDataDown` 小台代碼才是 `MTX`、**區間上限一個月**、
+  **休市回只有表頭的 CSV 而非 alert**、每列有尾逗號（讀檔要 `index_col=False`，否則整列錯位）。
+  全市場未平倉只加總「一般」單式列（含週契約），價差與盤後列不算。`tools/backfill_mini_futures_oi.py`
+  只 UPDATE 不 INSERT（理由同 `--backfill-futures-oi`）。
