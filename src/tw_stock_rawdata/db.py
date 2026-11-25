@@ -144,6 +144,12 @@ CREATE TABLE IF NOT EXISTS market_daily (
     day_trade_buy_amount_pct   NUMERIC(6,4),
     day_trade_sell_amount      BIGINT,
     day_trade_sell_amount_pct  NUMERIC(6,4),
+    mtx_market_oi              BIGINT,
+    mtx_inst_long_oi           BIGINT,
+    mtx_inst_short_oi          BIGINT,
+    tmf_market_oi              BIGINT,
+    tmf_inst_long_oi           BIGINT,
+    tmf_inst_short_oi          BIGINT,
     created_time          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_time          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -172,6 +178,16 @@ ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_buy_amount      BIGI
 ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_buy_amount_pct  NUMERIC(6,4);
 ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_sell_amount     BIGINT;
 ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS day_trade_sell_amount_pct NUMERIC(6,4);
+-- mtx_*／tmf_*：小型臺指（小台）／微型臺指（微台）期貨的原始未平倉口數（口），給下游算散戶多空比。
+-- *_market_oi：全市場未平倉量（期交所 futDataDown 一般盤各月份含週契約的未沖銷契約數加總，
+--   不含價差與盤後列）。*_inst_long_oi／*_inst_short_oi：三大法人多方／空方未平倉口數合計
+--   （futContractsDateDown，小台 commodityId=MXF、微台 TMF）；任一身份別缺席時為 NULL。
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS mtx_market_oi     BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS mtx_inst_long_oi  BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS mtx_inst_short_oi BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS tmf_market_oi     BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS tmf_inst_long_oi  BIGINT;
+ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS tmf_inst_short_oi BIGINT;
 
 -- stock_holder_percent (大戶 / 散戶持股佔比)
 -- 資料來源：TDCC 集保戶股權分散表，每週更新一次（trade_date 為週五結算日）。

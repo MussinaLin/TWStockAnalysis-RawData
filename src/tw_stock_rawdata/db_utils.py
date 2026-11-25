@@ -543,6 +543,13 @@ _DAY_TRADE_COL_TYPES: dict[str, str] = {
     "day_trade_sell_amount_pct": "numeric",
 }
 
+# 小台（mtx）／微台（tmf）原始未平倉口數：全市場、三大法人多方合計、空方合計。散戶多空比由下游算。
+_MINI_FUTURES_OI_COLS = [
+    f"{prefix}_{kind}"
+    for prefix in ("mtx", "tmf")
+    for kind in ("market_oi", "inst_long_oi", "inst_short_oi")
+]
+
 
 def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> None:
     """Upsert a single row into market_daily table.
@@ -553,7 +560,7 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         data: dict with keys: taiex_open, taiex_high, taiex_low, taiex_close,
               total_volume, margin_balance, margin_balance_change, foreign_net,
               以及 `_FUTURES_OI_COLS` 的台指期未平倉欄、`_VIX_COL_TYPES` 的台指 VIX 欄、
-              `_DAY_TRADE_COL_TYPES` 的當沖統計欄。
+              `_DAY_TRADE_COL_TYPES` 的當沖統計欄、`_MINI_FUTURES_OI_COLS` 的小台／微台未平倉欄。
     """
     row = {"trade_date": trade_date, **data}
     cols = [
@@ -562,6 +569,7 @@ def upsert_market_daily(database_url: str, trade_date: dt.date, data: dict) -> N
         *_FUTURES_OI_COLS,
         *_VIX_COL_TYPES,
         *_DAY_TRADE_COL_TYPES,
+        *_MINI_FUTURES_OI_COLS,
     ]
     # Only include columns that exist in data
     row = {c: row.get(c) for c in cols}
@@ -599,6 +607,29 @@ def update_market_futures_oi_batch(
     """
     return _update_market_columns_batch(
         database_url, {c: "bigint" for c in _FUTURES_OI_COLS}, updates
+    )
+
+
+
+def update_market_mini_futures_oi_batch(
+    database_url: str,
+    updates: list[tuple[dt.date, dict]],
+) -> int:
+    """批次覆寫 market_daily 的小台／微台未平倉 6 欄（tools/backfill_mini_futures_oi.py 用）。
+
+    只 UPDATE 已存在的 row、不 INSERT，理由同 `update_market_futures_oi_batch`。
+    新值為 NULL 的欄位保留舊值。
+
+    Args:
+        database_url: PostgreSQL connection string.
+        updates: list of (trade_date, data_dict)，data_dict 的鍵同 `_MINI_FUTURES_OI_COLS`
+                 （缺鍵視為 NULL）。
+
+    Returns:
+        實際 UPDATE 成功的 row 數合計。
+    """
+    return _update_market_columns_batch(
+        database_url, {c: "bigint" for c in _MINI_FUTURES_OI_COLS}, updates
     )
 
 

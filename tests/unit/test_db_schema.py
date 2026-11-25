@@ -14,6 +14,7 @@ from tw_stock_rawdata.db import _SCHEMA_SQL
 from tw_stock_rawdata.db_utils import (
     _DAY_TRADE_COL_TYPES,
     _FUTURES_OI_COLS,
+    _MINI_FUTURES_OI_COLS,
     _VIX_COL_TYPES,
 )
 
@@ -112,3 +113,22 @@ def test_etfs_table() -> None:
 )
 def test_etf_updated_time_triggers(trg: str, table: str) -> None:
     assert re.search(rf"tgname = '{trg}'.*?BEFORE UPDATE ON {table}\s", _SCHEMA_SQL, re.S)
+
+
+def test_mini_futures_oi_cols_order() -> None:
+    assert _MINI_FUTURES_OI_COLS == [
+        "mtx_market_oi", "mtx_inst_long_oi", "mtx_inst_short_oi",
+        "tmf_market_oi", "tmf_inst_long_oi", "tmf_inst_short_oi",
+    ]
+
+
+@pytest.mark.parametrize("col", _MINI_FUTURES_OI_COLS)
+def test_mini_futures_oi_column_in_create_table(col: str) -> None:
+    assert re.search(rf"^\s*{col}\s+BIGINT,", _create_table_body("market_daily"), re.M)
+
+
+@pytest.mark.parametrize("col", _MINI_FUTURES_OI_COLS)
+def test_mini_futures_oi_column_has_online_migration(col: str) -> None:
+    assert re.search(
+        rf"ALTER TABLE market_daily ADD COLUMN IF NOT EXISTS {col}\s+BIGINT;", _SCHEMA_SQL
+    )

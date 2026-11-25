@@ -312,3 +312,34 @@ class TestFindNextMarketTradeDate:
     def test_none_when_no_later_date(self, monkeypatch) -> None:
         _pool(monkeypatch, fetch_results=[(None,)])
         assert db_utils.find_next_market_trade_date(URL, dt.date(2026, 11, 13)) is None
+
+
+MINI_FUTURES_OI_COLS = [
+    "mtx_market_oi", "mtx_inst_long_oi", "mtx_inst_short_oi",
+    "tmf_market_oi", "tmf_inst_long_oi", "tmf_inst_short_oi",
+]
+
+
+class TestMiniFuturesOi:
+    def test_upsert_market_daily_writes_mini_futures_oi_with_coalesce(self, monkeypatch) -> None:
+        cur, _ = _pool(monkeypatch)
+        db_utils.upsert_market_daily(URL, dt.date(2026, 11, 24), {"mtx_market_oi": 33055})
+        sql, params = cur.executed[0]
+        assert params["mtx_market_oi"] == 33055
+        assert params["tmf_market_oi"] is None
+        for col in MINI_FUTURES_OI_COLS:
+            assert f"{col} = COALESCE(EXCLUDED.{col}, market_daily.{col})" in sql
+
+    def test_update_market_mini_futures_oi_batch_is_update_only(self, monkeypatch) -> None:
+        """script 只 UPDATE 不 INSERT：只有期貨欄的列會被 find_consensus_prev_trade_date 當成 D-1。"""
+        cur, conn = _pool(monkeypatch, rowcounts=[1])
+        updates = [(dt.date(2026, 11, 24), {"mtx_market_oi": 33055, "tmf_inst_short_oi": 41629})]
+        assert db_utils.update_market_mini_futures_oi_batch(URL, updates) == 1
+        sql, params = cur.executed[0]
+        assert sql.startswith("UPDATE market_daily AS t")
+        assert "INSERT" not in sql
+        for col in MINI_FUTURES_OI_COLS:
+            assert f"{col} = COALESCE(v.{col}, t.{col})" in sql
+        assert sql.count("%s::bigint") == len(MINI_FUTURES_OI_COLS)
+        assert params == [dt.date(2026, 11, 24), 33055, None, None, None, None, 41629]
+        assert conn.committed
