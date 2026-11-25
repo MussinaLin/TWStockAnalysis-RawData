@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 import requests
 
+import pandas as pd
+
 from tw_stock_rawdata import sources
+from tw_stock_rawdata.prepare import prepare_taifex_inst_long_short, prepare_taifex_market_oi
 from tw_stock_rawdata.sources import (
     MINI_FUTURES,
     DataUnavailableError,
@@ -161,3 +164,127 @@ def test_report_retries_transient_connection_error(monkeypatch) -> None:
     df = fetch_taifex_fut_daily_report(session, "MTX", D, D)
     assert len(session.calls) == 2
     assert len(df) == 35
+
+
+# ---------------------------------------------------------------------------
+# 解析：三大法人多／空單未平倉合計
+# ---------------------------------------------------------------------------
+
+TXF_ROWS = [
+    "2026/11/24,臺股期貨,自營商,1,1,1,1,0,0,5573,1,4414,1,1159,1",
+    "2026/11/24,臺股期貨,投信,1,1,1,1,0,0,95851,1,3445,1,92406,1",
+    "2026/11/24,臺股期貨,外資及陸資,1,1,1,1,0,0,12030,1,108817,1,-96787,1",
+]
+
+
+def _inst_df(rows=MXF_ROWS, header=INST_HEADER) -> pd.DataFrame:
+    return fetch_taifex_fut_institutional(_PostSession(_inst_csv(rows, header)), D, D, "MXF")
+
+
+def test_inst_sums_three_identities() -> None:
+    out = prepare_taifex_inst_long_short(_inst_df(), "小型臺指期貨", "mtx")
+    assert out == {D: {"mtx_inst_long_oi": 12678, "mtx_inst_short_oi": 8852}}
+
+
+def test_inst_tmf() -> None:
+    out = prepare_taifex_inst_long_short(_inst_df(TMF_ROWS), "微型臺指期貨", "tmf")
+    assert out == {D: {"tmf_inst_long_oi": 14768, "tmf_inst_short_oi": 41629}}
+
+
+def test_inst_missing_identity_gives_none() -> None:
+    rows = [r for r in MXF_ROWS if ",投信," not in r]
+    out = prepare_taifex_inst_long_short(_inst_df(rows), "小型臺指期貨", "mtx")
+    assert out == {D: {"mtx_inst_long_oi": None, "mtx_inst_short_oi": None}}
+
+
+def test_inst_blank_value_gives_none_for_that_column_only() -> None:
+    rows = [MXF_ROWS[0], "2026/11/24,小型臺指期貨,投信,0,0,0,0,0,0,,181458,168,338722,-78,-157264", MXF_ROWS[2]]
+    out = prepare_taifex_inst_long_short(_inst_df(rows), "小型臺指期貨", "mtx")
+    assert out == {D: {"mtx_inst_long_oi": None, "mtx_inst_short_oi": 8852}}
+
+
+def test_inst_other_products_ignored() -> None:
+    out = prepare_taifex_inst_long_short(_inst_df([*TXF_ROWS, *MXF_ROWS]), "小型臺指期貨", "mtx")
+    assert out == {D: {"mtx_inst_long_oi": 12678, "mtx_inst_short_oi": 8852}}
+
+
+def test_inst_no_product_rows_raises() -> None:
+    with pytest.raises(DataUnavailableError, match="小型臺指期貨"):
+        prepare_taifex_inst_long_short(_inst_df(TXF_ROWS), "小型臺指期貨", "mtx")
+
+
+def test_inst_unknown_identity_raises() -> None:
+    rows = [MXF_ROWS[0].replace("自營商", "自營商(避險)"), *MXF_ROWS[1:]]
+    with pytest.raises(DataUnavailableError, match="身份別"):
+        prepare_taifex_inst_long_short(_inst_df(rows), "小型臺指期貨", "mtx")
+
+
+def test_inst_missing_header_raises() -> None:
+    df = _inst_df().drop(columns=["空方未平倉口數"])
+    with pytest.raises(DataUnavailableError, match="空方未平倉口數"):
+        prepare_taifex_inst_long_short(df, "小型臺指期貨", "mtx")
+
+
+def test_inst_unparseable_date_raises() -> None:
+    rows = [MXF_ROWS[0].replace("2026/11/24", "bad"), *MXF_ROWS[1:]]
+    with pytest.raises(DataUnavailableError, match="日期"):
+        prepare_taifex_inst_long_short(_inst_df(rows), "小型臺指期貨", "mtx")
+
+
+# ---------------------------------------------------------------------------
+# 解析：全市場未平倉
+# ---------------------------------------------------------------------------
+
+
+def _report_df(content: bytes = MTX_REPORT) -> pd.DataFrame:
+    return fetch_taifex_fut_daily_report(_PostSession(content), "MTX", D, D)
+
+
+def test_market_oi_mtx_fixture() -> None:
+    assert prepare_taifex_market_oi(_report_df(), "MTX", "mtx") == {D: {"mtx_market_oi": 33055}}
+
+
+def test_market_oi_tmf_fixture() -> None:
+    assert prepare_taifex_market_oi(_report_df(TMF_REPORT), "TMF", "tmf") == {D: {"tmf_market_oi": 75681}}
+
+
+def test_market_oi_includes_weekly_contracts() -> None:
+    df = _report_df()
+    weekly = df[(df["到期月份(週別)"].str.strip() == "202611W4") & (df["交易時段"] == "一般")]
+    assert prepare_taifex_market_oi(weekly, "MTX", "mtx") == {D: {"mtx_market_oi": 865}}
+
+
+def test_market_oi_excludes_after_hours_and_spreads() -> None:
+    """排除依據是時段與到期月份含「/」，不是靠未沖銷契約數剛好是「-」。"""
+    df = _report_df()
+    rest = df[(df["交易時段"] == "盤後") | df["到期月份(週別)"].str.contains("/")].copy()
+    rest["未沖銷契約數"] = "100"
+    assert prepare_taifex_market_oi(rest, "MTX", "mtx") == {}
+
+
+def test_market_oi_other_commodity_ignored() -> None:
+    assert prepare_taifex_market_oi(_report_df(), "TMF", "tmf") == {}
+
+
+def test_market_oi_header_only_is_empty() -> None:
+    assert prepare_taifex_market_oi(_report_df(REPORT_HEADER_ONLY), "MTX", "mtx") == {}
+
+
+def test_market_oi_multiple_dates_keyed_separately() -> None:
+    df = _report_df()
+    nxt = df.copy()
+    nxt["交易日期"] = "2026/11/25"
+    out = prepare_taifex_market_oi(pd.concat([df, nxt]), "MTX", "mtx")
+    assert out == {D: {"mtx_market_oi": 33055}, dt.date(2026, 11, 25): {"mtx_market_oi": 33055}}
+
+
+def test_market_oi_missing_header_raises() -> None:
+    with pytest.raises(DataUnavailableError, match="交易時段"):
+        prepare_taifex_market_oi(_report_df().drop(columns=["交易時段"]), "MTX", "mtx")
+
+
+def test_market_oi_unparseable_date_raises() -> None:
+    df = _report_df()
+    df.loc[0, "交易日期"] = "bad"
+    with pytest.raises(DataUnavailableError, match="日期"):
+        prepare_taifex_market_oi(df, "MTX", "mtx")

@@ -1161,6 +1161,91 @@ def prepare_taifex_txf_oi(df: pd.DataFrame) -> dict[dt.date, dict[str, int | Non
     return out
 
 
+_TAIFEX_LONG_OI_COL = "多方未平倉口數"
+_TAIFEX_SHORT_OI_COL = "空方未平倉口數"
+
+
+def prepare_taifex_inst_long_short(
+    df: pd.DataFrame, product: str, prefix: str
+) -> dict[dt.date, dict[str, int | None]]:
+    """把期交所三大法人期貨 CSV 轉成 {date: {prefix_inst_long_oi, prefix_inst_short_oi}}（口）。
+
+    只取商品名稱 == product 的列（小台「小型臺指期貨」、微台「微型臺指期貨」），三個身份別的
+    多方／空方未平倉口數各自加總。每欄三個身份別都有值才加總，缺身份別或該欄空白就是 None——
+    缺的不當 0 加，交給 COALESCE 保留舊值。
+
+    與 prepare_taifex_txf_oi 結構相似但取的欄與語意不同（多／空分開 vs 淨額），不合併。
+    表頭、商品名稱、身份別或日期認不得都丟 DataUnavailableError。
+    """
+    df = df.rename(columns=lambda c: str(c).strip())
+    required = ["日期", "商品名稱", "身份別", _TAIFEX_LONG_OI_COL, _TAIFEX_SHORT_OI_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise DataUnavailableError(f"期交所 CSV 表頭缺少欄位：{'、'.join(missing)}")
+
+    rows = df.loc[df["商品名稱"].astype(str).str.strip() == product]
+    if rows.empty:
+        raise DataUnavailableError(f"期交所 CSV 找不到「{product}」的列")
+
+    by_date: dict[dt.date, dict[str, tuple[int | None, int | None]]] = {}
+    for _, row in rows.iterrows():
+        date = _parse_date_any(str(row["日期"]))
+        if date is None:
+            raise DataUnavailableError(f"期交所 CSV 日期無法解析：{row['日期']!r}")
+        identity = str(row["身份別"]).strip()
+        if identity not in _TAIFEX_IDENTITIES:
+            raise DataUnavailableError(f"期交所 CSV 出現無法辨識的身份別：{identity!r}")
+        by_date.setdefault(date, {})[identity] = (
+            _clean_int(row[_TAIFEX_LONG_OI_COL]),
+            _clean_int(row[_TAIFEX_SHORT_OI_COL]),
+        )
+
+    out: dict[dt.date, dict[str, int | None]] = {}
+    for date, identities in by_date.items():
+        sums: list[int | None] = []
+        for side in (0, 1):
+            parts = [identities.get(who, (None, None))[side] for who in _TAIFEX_IDENTITIES]
+            sums.append(sum(parts) if all(p is not None for p in parts) else None)  # type: ignore[arg-type]
+        out[date] = {f"{prefix}_inst_long_oi": sums[0], f"{prefix}_inst_short_oi": sums[1]}
+    return out
+
+
+_TAIFEX_REPORT_REQUIRED = ["交易日期", "契約", "到期月份(週別)", "未沖銷契約數", "交易時段"]
+
+
+def prepare_taifex_market_oi(
+    df: pd.DataFrame, commodity_id: str, prefix: str
+) -> dict[dt.date, dict[str, int]]:
+    """把期交所「期貨每日交易行情」CSV 轉成 {date: {prefix_market_oi}}（全市場未平倉，口）。
+
+    只加總 `契約 == commodity_id`、`交易時段 == 一般`、到期月份不含 `/`（排除價差）的列的
+    未沖銷契約數；週契約（如 202611W4）也算。盤後列與價差列沒有未平倉，不算。
+    沒有任何有效列的日期不出現；只有表頭（休市）→ 空 dict。
+    表頭或日期認不得丟 DataUnavailableError。
+    """
+    df = df.rename(columns=lambda c: str(c).strip())
+    missing = [c for c in _TAIFEX_REPORT_REQUIRED if c not in df.columns]
+    if missing:
+        raise DataUnavailableError(f"期交所行情 CSV 表頭缺少欄位：{'、'.join(missing)}")
+
+    out: dict[dt.date, dict[str, int]] = {}
+    key = f"{prefix}_market_oi"
+    for _, row in df.iterrows():
+        if str(row["契約"]).strip() != commodity_id:
+            continue
+        if str(row["交易時段"]).strip() != "一般" or "/" in str(row["到期月份(週別)"]):
+            continue
+        oi = _clean_int(row["未沖銷契約數"])
+        if oi is None:
+            continue
+        date = _parse_date_any(str(row["交易日期"]))
+        if date is None:
+            raise DataUnavailableError(f"期交所行情 CSV 日期無法解析：{row['交易日期']!r}")
+        day = out.setdefault(date, {key: 0})
+        day[key] += oi
+    return out
+
+
 # ---------------------------------------------------------------------------
 # ETF 規模（TWSE MIS all_etf.txt）
 # ---------------------------------------------------------------------------
