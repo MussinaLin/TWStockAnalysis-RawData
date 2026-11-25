@@ -40,6 +40,8 @@ tw-stock-rawdata --backfill-margin --backfill-start ... --backfill-end ...  # �
 tw-stock-rawdata --backfill-futures-oi --backfill-start ... --backfill-end ...  # 只回補台指期三大法人未平倉（期交所整段 1 發、只近三年）
 tw-stock-rawdata --backfill-vix --backfill-start ... --backfill-end ...  # 只回補台指 VIX（期交所月檔每月 1 發、只近 4 個月）
 tw-stock-rawdata --update-shares      # 只刷新 stocks.issued_shares
+tw-stock-rawdata --dahu               # 每週：大戶/散戶持股佔比 + etfs 清單的 ETF 受益人數（TDCC）
+python tools/backfill_etf_month_aum.py [--apply]  # 一次性：ETF 近 12 個月月底規模（e添富，只補 NULL）
 
 # 測試
 pytest tests/unit/
@@ -57,13 +59,16 @@ pytest tests/unit/
 ## 資料表
 
 PG infra（docker compose）由下游 `TWStockAnalysis` repo 擁有；本 repo 只擁有
-`stock_daily_raw` 的年度 partition。三張表：
+`stock_daily_raw` 的年度 partition。主要的表：
 
 - `stocks` — 個股 master（symbol PK、issued_shares、enabled、alpha_pick_enabled）
 - `stock_daily_raw` — 每日逐檔 raw（PK `(symbol, trade_date)`，**按年 RANGE partition**）
   含處置股註記 `is_disposition` / `disposition_match_minutes`（語意見 README）
 - `market_daily` — 大盤每日行情（trade_date PK），含台指期（大台）三大法人未平倉淨額 `txf_*`、
   台指 VIX 收盤值 `tw_vix_close`、上市大盤當沖統計 `day_trade_*`
+- `stock_holder_percent` — 每週大戶／散戶持股佔比（`--dahu`，TDCC）
+- `etfs` — 要追蹤的 ETF 清單（手動維護）；`etf_daily` — ETF 每日規模（daily，MIS 快照）
+  與每週受益人數（`--dahu`），PK `(symbol, trade_date)`，一列可能只有部分欄位
 
 ## Gotchas（重要不變量，改動前必讀）
 
