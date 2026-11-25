@@ -109,7 +109,6 @@ CREATE TABLE IF NOT EXISTS etf_daily (
 - 每個代號每個日期只打 1 次 TDCC（00981A 同時在兩個清單也只打 1 次），再依身分寫：
   - 在 `etfs` → `etf_daily.holders`（`prepare_tdcc_holder_count`）。
   - **不是**「只在 `etfs`、不在 `stocks`」→ 照舊寫 `stock_holder_percent`（既有行為不變）。
-- 名稱：ETF-only 代號取 `etfs.name`。
 - 歷史回補用既有參數：
   `tw-stock-rawdata --dahu --stocks 0050,0056,00878,00919,00981A,00403A --from 2025-11-28 --to 2026-11-20`
   （6 檔 × 51 週 = 306 次 TDCC 請求；00981A 的 `stock_holder_percent` 會以相同值重寫）。
