@@ -11,7 +11,7 @@ import threading
 import time
 import urllib3
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 import pandas as pd
 import requests
@@ -48,6 +48,9 @@ TPEX_DISPOSAL_V2_URL = "https://www.tpex.org.tw/www/zh-tw/bulletin/disposal"
 # 期交所三大法人「區分各期貨契約」CSV 下載。吃日期區間（實測近三年整段一發回完），
 # 但只保留近三年；休市、超出範圍都回 HTTP 200 + HTML alert，見 fetch_taifex_txf_institutional。
 TAIFEX_FUT_CONTRACTS_DOWN_URL = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
+# 期交所「期貨每日交易行情」CSV 下載（全市場未沖銷契約數）。區間上限約一個月；休市回只有表頭的 CSV，
+# 見 fetch_taifex_fut_daily_report。
+TAIFEX_FUT_DAILY_REPORT_URL = "https://www.taifex.com.tw/cht/3/futDataDown"
 # 台指 VIX：daily 用當日檔（收盤後即有 13:45 列），回補用月檔（只保留近 4 個月）。
 TAIFEX_VIX_DAILY_URL = "https://www.taifex.com.tw/cht/7/getVixData"
 TAIFEX_VIX_MONTH_URL = (
@@ -1364,14 +1367,53 @@ def fetch_twse_day_trade(
 _TAIFEX_ALERT_RE = re.compile(r'alert\(\s*"([^"]*)"\s*\)')
 
 
+class MiniFuture(NamedTuple):
+    """小台／微台在各端點的代碼與名稱（market_daily 欄名前綴、log 用名、法人／行情代碼、法人 CSV 商品名稱）。"""
+
+    prefix: str
+    label: str
+    inst_id: str
+    report_id: str
+    product: str
+
+
+# 小台的法人端點代碼是 MXF（填 MTX 回「查無資料」），行情端點才是 MTX。
+MINI_FUTURES: tuple[MiniFuture, ...] = (
+    MiniFuture("mtx", "小台", "MXF", "MTX", "小型臺指期貨"),
+    MiniFuture("tmf", "微台", "TMF", "TMF", "微型臺指期貨"),
+)
+
+
+def _taifex_csv_text(
+    content: bytes, start: dt.date, end: dt.date, range_hint: str
+) -> str:
+    """期交所 CSV 下載的共用錯誤判斷：HTML alert 頁丟 DataUnavailableError，否則回 cp950 解碼文字。
+
+    錯誤一律是 HTTP 200 + UTF-8 的 HTML alert 頁，只能從內容分辨。「日期時間錯誤」的意思
+    依端點而異（法人：起日超過近三年；行情：區間超過一個月），由呼叫端以 range_hint 說明。
+    """
+    if content.lstrip().startswith(b"<"):
+        page = content.decode("utf-8", errors="replace")
+        match = _TAIFEX_ALERT_RE.search(page)
+        if match is None:
+            raise DataUnavailableError("期交所回傳非 CSV 內容（亦無錯誤訊息）")
+        message = match.group(1)
+        if "日期時間錯誤" in message:
+            raise DataUnavailableError(f"期交所回應「{message}」：{range_hint}")
+        raise DataUnavailableError(f"期交所回應「{message}」（{start} ~ {end}）")
+    return content.decode("cp950")
+
+
 @_retry_on_transient
-def fetch_taifex_txf_institutional(
+def fetch_taifex_fut_institutional(
     session: requests.Session,
     start: dt.date,
     end: dt.date,
+    commodity_id: str,
 ) -> pd.DataFrame:
-    """抓臺股期貨（大台，TXF）在 [start, end] 的三大法人交易與未平倉，回傳原始字串表。
+    """抓某期貨契約在 [start, end] 的三大法人交易與未平倉，回傳原始字串表。
 
+    commodity_id 是期交所「三大法人－區分各期貨契約」的代碼（大台 TXF、小台 MXF、微台 TMF）。
     每個交易日 3 列（自營商／投信／外資及陸資）。端點吃區間，回補整段只需一發。
 
     回應是 cp950 CSV（content-type 卻標 text/html）。錯誤一律是 HTTP 200 + UTF-8 的
@@ -1383,26 +1425,58 @@ def fetch_taifex_txf_institutional(
     data = {
         "queryStartDate": start.strftime("%Y/%m/%d"),
         "queryEndDate": end.strftime("%Y/%m/%d"),
-        "commodityId": "TXF",
+        "commodityId": commodity_id,
     }
     response = session.post(TAIFEX_FUT_CONTRACTS_DOWN_URL, data=data, timeout=30)
     response.raise_for_status()
-    content = response.content
+    text = _taifex_csv_text(
+        response.content, start, end,
+        f"該端點只提供近三年資料，起日 {start} 可能太舊",
+    )
+    return pd.read_csv(io.StringIO(text), dtype=str)
 
-    if content.lstrip().startswith(b"<"):
-        page = content.decode("utf-8", errors="replace")
-        match = _TAIFEX_ALERT_RE.search(page)
-        if match is None:
-            raise DataUnavailableError("期交所回傳非 CSV 內容（亦無錯誤訊息）")
-        message = match.group(1)
-        if "日期時間錯誤" in message:
-            raise DataUnavailableError(
-                f"期交所回應「{message}」：該端點只提供近三年資料，"
-                f"起日 {start} 可能太舊"
-            )
-        raise DataUnavailableError(f"期交所回應「{message}」（{start} ~ {end}）")
 
-    return pd.read_csv(io.StringIO(content.decode("cp950")), dtype=str)
+def fetch_taifex_txf_institutional(
+    session: requests.Session,
+    start: dt.date,
+    end: dt.date,
+) -> pd.DataFrame:
+    """抓臺股期貨（大台，TXF）在 [start, end] 的三大法人交易與未平倉，回傳原始字串表。
+
+    重試在 fetch_taifex_fut_institutional 上，這裡不再加 decorator（避免重試巢狀）。
+    """
+    return fetch_taifex_fut_institutional(session, start, end, "TXF")
+
+
+@_retry_on_transient
+def fetch_taifex_fut_daily_report(
+    session: requests.Session,
+    commodity_id: str,
+    start: dt.date,
+    end: dt.date,
+) -> pd.DataFrame:
+    """抓某期貨商品在 [start, end] 的「期貨每日交易行情」，回傳原始字串表。
+
+    commodity_id 是行情端點的代碼（小台 MTX、微台 TMF）。每個交易日每個到期月份有「一般」
+    「盤後」兩列，另有價差列（到期月份含 `/`）；只有一般單式列有未沖銷契約數，其餘是 `-`。
+
+    - 區間上限約一個月，超過回「日期時間錯誤」alert → DataUnavailableError。
+    - 休市日**不回 alert**，回只有表頭的 CSV → 空 DataFrame（由 prepare 當成沒有該日）。
+    - 每列比表頭多一個尾逗號，必須 `index_col=False`，否則 pandas 把第一欄當 index、整列錯位。
+    """
+    data = {
+        "down_type": "1",
+        "commodity_id": commodity_id,
+        "commodity_id2": "",
+        "queryStartDate": start.strftime("%Y/%m/%d"),
+        "queryEndDate": end.strftime("%Y/%m/%d"),
+    }
+    response = session.post(TAIFEX_FUT_DAILY_REPORT_URL, data=data, timeout=30)
+    response.raise_for_status()
+    text = _taifex_csv_text(
+        response.content, start, end, f"該端點一次最多查一個月（{start} ~ {end}）"
+    )
+    return pd.read_csv(io.StringIO(text), dtype=str, index_col=False)
 
 
 _VIX_DAILY_HEADER = ["交易日期", "時間(時/分/秒/毫秒)", "臺指選擇權波動率指數"]
