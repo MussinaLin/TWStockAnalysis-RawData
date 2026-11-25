@@ -484,11 +484,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dahu", action="store_true",
-        help="只更新大戶持股佔比（TDCC 集保戶股權分散表，每週一次），其他資料不更新",
+        help="只更新大戶/散戶持股佔比與 etfs 清單的 ETF 受益人數（TDCC 集保戶股權分散表，每週一次），其他資料不更新",
     )
     parser.add_argument(
         "--stocks", type=str, default=None,
-        help="搭配 --dahu：只更新特定股票（逗號分隔，例：2330,2303）",
+        help="搭配 --dahu：只更新特定代號，個股或 etfs 清單的 ETF 皆可（逗號分隔，例：2330,0050）",
     )
     parser.add_argument(
         "--from", dest="from_date", type=str, default=None,

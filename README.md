@@ -83,7 +83,7 @@ tw-stock-rawdata --update-shares
 # 預設只抓最新一筆週資料；對象 = 啟用個股 + etfs 清單的 ETF
 tw-stock-rawdata --dahu
 
-# 只更新特定股票
+# 只更新特定代號（個股或 etfs 清單的 ETF 皆可）
 tw-stock-rawdata --dahu --stocks 2330,2303
 
 # 更新區間內所有週資料日（資料每週一次，會對應到區間內的週五結算日）
