@@ -66,6 +66,8 @@ from .prepare import (
     prepare_twse_issued_shares,
     prepare_twse_margin,
     prepare_twse_mi_index,
+    prepare_taifex_inst_long_short,
+    prepare_taifex_market_oi,
     prepare_taifex_txf_oi,
 )
 from .price_limit import calc_limits, is_etf
@@ -74,6 +76,9 @@ from .sources import (
     build_session,
     fetch_mis_etf_snapshot,
     fetch_moneydj_holding_pct,
+    MINI_FUTURES,
+    fetch_taifex_fut_daily_report,
+    fetch_taifex_fut_institutional,
     fetch_taifex_txf_institutional,
     fetch_taifex_vix_close,
     fetch_taifex_vix_month,
@@ -3130,7 +3135,7 @@ def _update_etf_daily(
 def _fetch_and_upsert_market_daily(
     session: requests.Session, date: dt.date, config: AppConfig
 ) -> None:
-    """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉, 台指 VIX, 上市當沖統計 and upsert to market_daily."""
+    """Fetch TAIEX OHLC, volume, foreign net, margin, 台指期三大法人未平倉, 小台／微台未平倉, 台指 VIX, 上市當沖統計 and upsert to market_daily."""
     market_data: dict = {}
 
     # 每個子來源失敗都要印 log（README「來源失敗一律印 log」）：這些欄位寫成 NULL 之後
@@ -3175,6 +3180,32 @@ def _fetch_and_upsert_market_daily(
             market_data.update(oi_map[date])
     except (DataUnavailableError, requests.RequestException) as exc:
         print(f"  台指期三大法人未平倉取得失敗：{exc}")
+
+    # 期交所小台／微台原始未平倉口數（給下游算散戶多空比）：每商品法人、行情各 1 次請求，
+    # 4 個來源各自獨立失敗。行情在休市日回只有表頭的 CSV（不是 alert），會走「沒有該日」。
+    for fut in MINI_FUTURES:
+        try:
+            inst_map = prepare_taifex_inst_long_short(
+                fetch_taifex_fut_institutional(session, date, date, fut.inst_id),
+                fut.product, fut.prefix,
+            )
+            if date in inst_map:
+                market_data.update(inst_map[date])
+            else:
+                print(f"  {fut.label}三大法人未平倉取得失敗：期交所沒有 {date}")
+        except (DataUnavailableError, requests.RequestException) as exc:
+            print(f"  {fut.label}三大法人未平倉取得失敗：{exc}")
+        try:
+            mkt_map = prepare_taifex_market_oi(
+                fetch_taifex_fut_daily_report(session, fut.report_id, date, date),
+                fut.report_id, fut.prefix,
+            )
+            if date in mkt_map:
+                market_data.update(mkt_map[date])
+            else:
+                print(f"  {fut.label}全市場未平倉取得失敗：期交所行情沒有 {date}")
+        except (DataUnavailableError, requests.RequestException) as exc:
+            print(f"  {fut.label}全市場未平倉取得失敗：{exc}")
 
     # 期交所台指 VIX 13:45 收盤值（當日檔，收盤後即有）。
     try:

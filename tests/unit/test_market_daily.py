@@ -47,9 +47,40 @@ def _taifex_df(date_str: str = "2026/08/21") -> pd.DataFrame:
     )
 
 
+_MINI_INST = {  # commodity_id -> (商品名稱, [(身份別, 多方未平倉口數, 空方未平倉口數)])
+    "MXF": ("小型臺指期貨", [("自營商", "7578", "5227"), ("投信", "90", "168"), ("外資及陸資", "5010", "3457")]),
+    "TMF": ("微型臺指期貨", [("自營商", "2099", "34153"), ("投信", "0", "0"), ("外資及陸資", "12669", "7476")]),
+}
+_MINI_REPORT_OI = {"MTX": "33055", "TMF": "75681"}
+MINI_EXPECTED = {
+    "mtx_market_oi": 33055, "mtx_inst_long_oi": 12678, "mtx_inst_short_oi": 8852,
+    "tmf_market_oi": 75681, "tmf_inst_long_oi": 14768, "tmf_inst_short_oi": 41629,
+}
+
+
+def _mini_inst_df(commodity_id: str, date_str: str = "2026/08/21") -> pd.DataFrame:
+    """fetch_taifex_fut_institutional 的原始字串表（只放 prepare 會讀的欄）。"""
+    product, rows = _MINI_INST[commodity_id]
+    return pd.DataFrame(
+        [{"日期": date_str, "商品名稱": product, "身份別": who,
+          "多方未平倉口數": long_, "空方未平倉口數": short}
+         for who, long_, short in rows]
+    )
+
+
+def _mini_report_df(commodity_id: str, date_str: str = "2026/08/21") -> pd.DataFrame:
+    """fetch_taifex_fut_daily_report 的原始字串表：一般單式 1 列 + 盤後 1 列。"""
+    return pd.DataFrame([
+        {"交易日期": date_str, "契約": commodity_id, "到期月份(週別)": "202609",
+         "未沖銷契約數": _MINI_REPORT_OI[commodity_id], "交易時段": "一般"},
+        {"交易日期": date_str, "契約": commodity_id, "到期月份(週別)": "202609",
+         "未沖銷契約數": "-", "交易時段": "盤後"},
+    ])
+
+
 @pytest.fixture
 def wiring(monkeypatch):
-    calls = {"upserts": [], "corrections": [], "taifex": []}
+    calls = {"upserts": [], "corrections": [], "taifex": [], "mini_inst": [], "mini_report": []}
     monkeypatch.setattr(run, "fetch_twse_taiex_ohlc", lambda s, d: {DATE: dict(OHLC)})
     monkeypatch.setattr(run, "fetch_twse_market_volume", lambda s, d: {DATE: 123456})
     monkeypatch.setattr(run, "fetch_twse_foreign_net", lambda s, d: -5000)
@@ -63,6 +94,17 @@ def wiring(monkeypatch):
         return _taifex_df()
 
     monkeypatch.setattr(run, "fetch_taifex_txf_institutional", fake_taifex)
+
+    def fake_mini_inst(session, start, end, commodity_id):
+        calls["mini_inst"].append((commodity_id, start, end))
+        return _mini_inst_df(commodity_id)
+
+    def fake_mini_report(session, commodity_id, start, end):
+        calls["mini_report"].append((commodity_id, start, end))
+        return _mini_report_df(commodity_id)
+
+    monkeypatch.setattr(run, "fetch_taifex_fut_institutional", fake_mini_inst)
+    monkeypatch.setattr(run, "fetch_taifex_fut_daily_report", fake_mini_report)
     monkeypatch.setattr(run, "fetch_taifex_vix_close", lambda s, d: 52.13)
     monkeypatch.setattr(run, "fetch_twse_day_trade", lambda s, d: dict(DAY_TRADE))
 
@@ -208,6 +250,8 @@ class TestPartialFailureIsolation:
             ("fetch_twse_foreign_net", DataUnavailableError("x")),
             ("fetch_twse_market_margin", DataUnavailableError("x")),
             ("fetch_taifex_txf_institutional", DataUnavailableError("x")),
+            ("fetch_taifex_fut_institutional", DataUnavailableError("x")),
+            ("fetch_taifex_fut_daily_report", DataUnavailableError("x")),
             ("fetch_taifex_vix_close", DataUnavailableError("x")),
             ("fetch_twse_day_trade", DataUnavailableError("x")),
         ]:
@@ -280,3 +324,70 @@ class TestCorrectionFailureIsContained:
         )
         run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
         assert "NULL" in capsys.readouterr().out
+
+
+class TestMiniFuturesOi:
+    """小台／微台：每商品兩個來源（法人、行情）各自獨立失敗，併入同一次 upsert。"""
+
+    def test_mini_futures_oi_merged_into_same_upsert(self, wiring) -> None:
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        data = _written(wiring)
+        for key, value in MINI_EXPECTED.items():
+            assert data[key] == value
+        assert data["txf_foreign_oi_net"] == -96787
+
+    def test_mini_futures_query_target_date_and_commodity_ids(self, wiring) -> None:
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        assert wiring["mini_inst"] == [("MXF", DATE, DATE), ("TMF", DATE, DATE)]
+        assert wiring["mini_report"] == [("MTX", DATE, DATE), ("TMF", DATE, DATE)]
+
+    def test_mini_report_failure_keeps_other_columns(self, monkeypatch, capsys, wiring) -> None:
+        def report(session, commodity_id, start, end):
+            if commodity_id == "TMF":
+                raise requests.RequestException("520")
+            return _mini_report_df(commodity_id)
+
+        monkeypatch.setattr(run, "fetch_taifex_fut_daily_report", report)
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        data = _written(wiring)
+        assert "tmf_market_oi" not in data
+        for key in MINI_EXPECTED.keys() - {"tmf_market_oi"}:
+            assert data[key] == MINI_EXPECTED[key]
+        assert "txf_foreign_oi_net" in data and data["taiex_close"] == 24100.0
+        assert "微台全市場未平倉取得失敗" in capsys.readouterr().out
+
+    def test_mini_inst_failure_keeps_other_columns(self, monkeypatch, capsys, wiring) -> None:
+        def inst(session, start, end, commodity_id):
+            if commodity_id == "MXF":
+                raise DataUnavailableError("查無資料")
+            return _mini_inst_df(commodity_id)
+
+        monkeypatch.setattr(run, "fetch_taifex_fut_institutional", inst)
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        data = _written(wiring)
+        assert "mtx_inst_long_oi" not in data and "mtx_inst_short_oi" not in data
+        assert data["mtx_market_oi"] == 33055 and data["tmf_inst_long_oi"] == 14768
+        out = capsys.readouterr().out
+        assert "小台三大法人未平倉取得失敗" in out and "查無資料" in out
+
+    def test_mini_report_without_target_date_is_logged(self, monkeypatch, capsys, wiring) -> None:
+        """休市日 futDataDown 回只有表頭（空表）→ 沒有該日：不寫、印 log。"""
+        monkeypatch.setattr(
+            run, "fetch_taifex_fut_daily_report",
+            lambda s, c, a, b: _mini_report_df(c).iloc[0:0],
+        )
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        data = _written(wiring)
+        assert "mtx_market_oi" not in data and "tmf_market_oi" not in data
+        assert data["mtx_inst_long_oi"] == 12678
+        assert "沒有 2026-08-21" in capsys.readouterr().out
+
+    def test_mini_format_change_does_not_block_others(self, monkeypatch, wiring) -> None:
+        monkeypatch.setattr(
+            run, "fetch_taifex_fut_institutional",
+            lambda s, a, b, c: _mini_inst_df(c).rename(columns={"身份別": "身分別"}),
+        )
+        run._fetch_and_upsert_market_daily(None, DATE, CONFIG)
+        data = _written(wiring)
+        assert not any(k.endswith("_inst_long_oi") or k.endswith("_inst_short_oi") for k in data)
+        assert data["mtx_market_oi"] == 33055 and data["taiex_close"] == 24100.0

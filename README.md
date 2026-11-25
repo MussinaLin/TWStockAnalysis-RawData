@@ -292,6 +292,15 @@ MoneyDJ 法人持股頁（`zcl`），與三大法人買賣超是同一次請求�
 - **法人合計**在任一身份別缺席（或該欄空白）時為 `NULL`，缺的不當 0 加。
 - **全市場未平倉**是期交所每日行情中「一般」時段各到期月份（含小台週契約，如 `202611W4`）的
   未沖銷契約數加總；價差列（到期月份含 `/`）與盤後列沒有未平倉，不算。
+- **daily**：`market_daily` 大台期貨之後的子來源。每個日期打 4 次期交所（小台／微台各一次法人、一次行情），
+  4 個來源各自獨立失敗，失敗只是對應欄位不寫並印 log。`--date` 與一般 `--backfill-start/--backfill-end`
+  同樣每天打這 4 次；`--backfill-stocks` 不動 `market_daily`。
+- **來源**：
+  - 法人：期交所「三大法人－區分各期貨契約」（`POST …/cht/3/futContractsDateDown`），與大台同一支；
+    小台 `commodityId=MXF`（填 `MTX` 會回「查無資料」）、微台 `TMF`。只保留近三年。
+  - 全市場：期交所「期貨每日交易行情」下載（`POST https://www.taifex.com.tw/cht/3/futDataDown`，
+    `down_type=1`、`commodity_id=MTX`／`TMF`）。**區間上限約一個月**；**休市回只有表頭的 CSV**（不是 alert）；
+    每列比表頭多一個尾逗號（程式以 `index_col=False` 讀，否則整列錯位）。當日 15:41 已有當日資料。
 
 ### 台指 VIX 與大盤當沖（market_daily）
 
