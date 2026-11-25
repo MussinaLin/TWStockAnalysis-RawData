@@ -3,12 +3,14 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import io
+import json
 import os
 import random
 import re
 import threading
 import time
 import urllib3
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -53,6 +55,8 @@ TAIFEX_VIX_MONTH_URL = (
 )
 # ETF 即時淨值揭露（1 次回全部 ETF 的當下快照：已發行單位數、前一營業日淨值）。
 TWSE_MIS_ALL_ETF_URL = "https://mis.twse.com.tw/stock/data/all_etf.txt"
+# e添富 ETF 商品頁（內嵌 chartData，含近 12 個月的月規模；一次性回補用）。
+TWSE_ETF_INFO_URL = "https://www.twse.com.tw/zh/ETFortune/etfInfo/{symbol}"
 MONEYDJ_MARGIN_URL = "https://concords.moneydj.com/z/zc/zcn/zcn.djhtm"
 MONEYDJ_HOLDING_URL = "https://concords.moneydj.com/z/zc/zcl/zcl.djhtm"
 TDCC_QRY_STOCK_URL = "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock"
@@ -1514,6 +1518,38 @@ def fetch_mis_etf_snapshot(session: requests.Session) -> list[dict]:
     if not entries:
         raise DataUnavailableError("MIS all_etf.txt 沒有任何 ETF 資料")
     return entries
+
+
+_CHART_DATA_RE = re.compile(r"let chartData\s*=\s*(\{.*?\});", re.S)
+
+
+def fetch_etf_month_aum(session: requests.Session, symbol: str) -> list[tuple[str, Decimal]]:
+    """抓 e添富 ETF 商品頁內嵌的「月規模」：[(英文月份標籤, 億元)]，依時間由舊到新。
+
+    頁面 tooltip：「顯示過去12個月，每個月最後一個營業日的資產規模」。標籤沒有年份，
+    推年份交給 prepare.resolve_month_labels。www.twse.com.tw 限流時回的頁面沒有
+    chartData，同樣丟 DataUnavailableError。
+
+    Raises:
+        DataUnavailableError: 找不到 chartData、JSON 解析失敗、totalMonthAv 形狀不對。
+    """
+    html = _http_get(session, TWSE_ETF_INFO_URL.format(symbol=symbol)).text
+    match = _CHART_DATA_RE.search(html)
+    if not match:
+        raise DataUnavailableError(f"e添富 {symbol} 頁面沒有 chartData（可能被限流）")
+    try:
+        months = json.loads(match.group(1)).get("totalMonthAv")
+    except (json.JSONDecodeError, AttributeError) as exc:
+        raise DataUnavailableError(f"e添富 {symbol} chartData 解析失敗：{exc}") from exc
+    if not isinstance(months, list):
+        raise DataUnavailableError(f"e添富 {symbol} chartData 沒有 totalMonthAv 陣列")
+    out: list[tuple[str, Decimal]] = []
+    for item in months:
+        try:
+            out.append((str(item["date"]).strip(), Decimal(str(item["count"]))))
+        except (KeyError, TypeError, InvalidOperation) as exc:
+            raise DataUnavailableError(f"e添富 {symbol} 月規模資料異常：{item!r}") from exc
+    return out
 
 
 # ---------------------------------------------------------------------------

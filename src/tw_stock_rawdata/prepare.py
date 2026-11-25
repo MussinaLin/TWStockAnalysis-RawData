@@ -1218,3 +1218,30 @@ def prepare_mis_etf_rows(
             "aum_100m": (units * nav / _HUNDRED_MILLION).quantize(_AUM_QUANT, rounding=ROUND_HALF_UP),
         })
     return rows, problems
+
+
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def resolve_month_labels(labels: list[str], today: dt.date) -> list[tuple[int, int]]:
+    """把 e添富月規模的英文月份標籤（依時間由舊到新、沒有年份）對應成 (year, month)。
+
+    最後一個標籤 = 從 today 所在月份往前找、第一個名稱相符的月份；其餘逐一往前一個月，
+    名稱不符（標籤不連續或不認得）→ ValueError，避免把數值掛到錯的月份。
+    """
+    if not labels:
+        return []
+    months = [(_MONTH_ABBR.index(label) + 1) if label in _MONTH_ABBR else None for label in labels]
+    if None in months:
+        raise ValueError(f"不認得的月份標籤：{labels}")
+    year, month = today.year, today.month
+    while month != months[-1]:
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    out = [(year, month)]
+    for expected in reversed(months[:-1]):
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+        if month != expected:
+            raise ValueError(f"月份標籤不連續：{labels}")
+        out.append((year, month))
+    return list(reversed(out))

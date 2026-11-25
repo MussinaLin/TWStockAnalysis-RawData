@@ -483,6 +483,23 @@ ON CONFLICT (symbol) DO NOTHING;
 
   上市晚於區間起日的 ETF（如 00403A，2026-05 上市），上市前的週查不到資料，會重試後跳過，屬預期。
 
+**規模歷史：一次性回補月規模（`tools/backfill_etf_month_aum.py`）**
+
+MIS 沒有歷史，daily 只能從上線那天開始累積；更早的規模用 e添富 ETF 商品頁
+（`https://www.twse.com.tw/zh/ETFortune/etfInfo/<代號>`）內嵌的「月規模」補：
+
+- 近 12 個月、每月一筆，頁面說明是「每個月最後一個營業日的資產規模」（億元），
+  所以寫在 `market_daily` 該月最後一個 `trade_date`。標籤只有英文月份，年份由最近一筆往前推；
+  標籤不連續就該檔中止。
+- **只補 `aum_100m` 為 NULL 的列**，不覆蓋 daily 寫的值、不碰其他欄位；上市前的月份（值 <= 0）略過。
+- 每檔 1 次 www.twse.com.tw 請求（限速）；某檔失敗（含限流時的空殼頁面）印出後繼續下一檔，重跑即可。
+- 預設只模擬，加 `--apply` 才寫；先印目標 DB host。
+
+```bash
+python tools/backfill_etf_month_aum.py           # 模擬
+python tools/backfill_etf_month_aum.py --apply   # 寫入
+```
+
 ### OHLCV 來源順序（逐檔請求最小化）
 
 > 本節只適用於 **daily 模式與一般日期區間回補**（`BatchSourceProvider`，走
